@@ -126,6 +126,8 @@ pub struct InferenceResult {
     method_resolutions: FxHashMap<ExprId, Function>,
     /// For each field access expr, records the field it resolves to.
     field_resolutions: FxHashMap<ExprId, StructField>,
+    /// For each field in record literal, records the field it resolves to.
+    record_field_resolutions: FxHashMap<ExprId, StructField>,
     /// For each struct literal, records the variant it resolves to.
     variant_resolutions: FxHashMap<ExprOrPatId, VariantDef>,
     /// For each associated item record what it resolves to
@@ -142,6 +144,9 @@ impl InferenceResult {
     }
     pub fn field_resolution(&self, expr: ExprId) -> Option<StructField> {
         self.field_resolutions.get(&expr).copied()
+    }
+    pub fn record_field_resolution(&self, expr: ExprId) -> Option<StructField> {
+        self.record_field_resolutions.get(&expr).copied()
     }
     pub fn variant_resolution_for_expr(&self, id: ExprId) -> Option<VariantDef> {
         self.variant_resolutions.get(&id.into()).copied()
@@ -565,7 +570,7 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
 
     fn collect_fn(&mut self, data: &FunctionData) {
         let body = Arc::clone(&self.body); // avoid borrow checker problem
-        for (type_ref, pat) in data.params.iter().zip(body.params()) {
+        for (type_ref, pat) in data.params.iter().zip(body.params.iter()) {
             let ty = self.make_ty(type_ref);
 
             self.infer_pat(*pat, &ty, BindingMode::default());
@@ -574,7 +579,7 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
     }
 
     fn infer_body(&mut self) {
-        self.infer_expr(self.body.body_expr(), &Expectation::has_type(self.return_ty.clone()));
+        self.infer_expr(self.body.body_expr, &Expectation::has_type(self.return_ty.clone()));
     }
 
     fn resolve_into_iter_item(&self) -> Option<TypeAlias> {

@@ -80,16 +80,16 @@ use crate::{
 /// Contains all top-level defs from a macro-expanded crate
 #[derive(Debug, PartialEq, Eq)]
 pub struct CrateDefMap {
-    krate: CrateId,
-    edition: Edition,
+    pub root: LocalModuleId,
+    pub modules: Arena<LocalModuleId, ModuleData>,
+    pub(crate) krate: CrateId,
     /// The prelude module for this crate. This either comes from an import
     /// marked with the `prelude_import` attribute, or (in the normal case) from
     /// a dependency (`std` or `core`).
-    prelude: Option<ModuleId>,
-    extern_prelude: FxHashMap<Name, ModuleDefId>,
-    root: LocalModuleId,
-    modules: Arena<LocalModuleId, ModuleData>,
+    pub(crate) prelude: Option<ModuleId>,
+    pub(crate) extern_prelude: FxHashMap<Name, ModuleDefId>,
 
+    edition: Edition,
     diagnostics: Vec<DefDiagnostic>,
 }
 
@@ -169,7 +169,7 @@ impl ModuleScope {
     pub fn macros<'a>(&'a self) -> impl Iterator<Item = (&'a Name, MacroDefId)> + 'a {
         self.items
             .iter()
-            .filter_map(|(name, res)| res.def.get_macros().map(|macro_| (name, macro_)))
+            .filter_map(|(name, res)| res.def.take_macros().map(|macro_| (name, macro_)))
     }
 
     /// Iterate over all legacy textual scoped macros visable at the end of the module
@@ -229,22 +229,6 @@ impl CrateDefMap {
         Arc::new(def_map)
     }
 
-    pub fn krate(&self) -> CrateId {
-        self.krate
-    }
-
-    pub fn root(&self) -> LocalModuleId {
-        self.root
-    }
-
-    pub fn prelude(&self) -> Option<ModuleId> {
-        self.prelude
-    }
-
-    pub fn extern_prelude(&self) -> &FxHashMap<Name, ModuleDefId> {
-        &self.extern_prelude
-    }
-
     pub fn add_diagnostics(
         &self,
         db: &impl DefDatabase,
@@ -252,10 +236,6 @@ impl CrateDefMap {
         sink: &mut DiagnosticSink,
     ) {
         self.diagnostics.iter().for_each(|it| it.add_to(db, module, sink))
-    }
-
-    pub fn modules(&self) -> impl Iterator<Item = LocalModuleId> + '_ {
-        self.modules.iter().map(|(id, _data)| id)
     }
 
     pub fn modules_for_file(&self, file_id: FileId) -> impl Iterator<Item = LocalModuleId> + '_ {

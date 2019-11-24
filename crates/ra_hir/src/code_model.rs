@@ -62,7 +62,7 @@ impl Crate {
     }
 
     pub fn root_module(self, db: &impl DefDatabase) -> Option<Module> {
-        let module_id = db.crate_def_map(self.crate_id).root();
+        let module_id = db.crate_def_map(self.crate_id).root;
         Some(Module::new(self, module_id))
     }
 
@@ -195,7 +195,7 @@ impl Module {
     /// in the module tree of any target in `Cargo.toml`.
     pub fn crate_root(self, db: &impl DefDatabase) -> Module {
         let def_map = db.crate_def_map(self.id.krate);
-        self.with_module_id(def_map.root())
+        self.with_module_id(def_map.root)
     }
 
     /// Finds a child module with the specified name.
@@ -510,7 +510,7 @@ impl VariantDef {
         }
     }
 
-    pub fn field(self, db: &impl HirDatabase, name: &Name) -> Option<StructField> {
+    pub(crate) fn field(self, db: &impl HirDatabase, name: &Name) -> Option<StructField> {
         match self {
             VariantDef::Struct(it) => it.field(db, name),
             VariantDef::EnumVariant(it) => it.field(db, name),
@@ -1037,7 +1037,7 @@ impl From<PerNs> for ScopeDef {
             .or_else(|| def.take_values())
             .map(|module_def_id| ScopeDef::ModuleDef(module_def_id.into()))
             .or_else(|| {
-                def.get_macros().map(|macro_def_id| ScopeDef::MacroDef(macro_def_id.into()))
+                def.take_macros().map(|macro_def_id| ScopeDef::MacroDef(macro_def_id.into()))
             })
             .unwrap_or(ScopeDef::Unknown)
     }
