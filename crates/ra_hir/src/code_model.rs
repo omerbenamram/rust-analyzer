@@ -1,8 +1,6 @@
 //! FIXME: write short doc here
 
 pub(crate) mod src;
-pub(crate) mod docs;
-pub(crate) mod attrs;
 
 use std::sync::Arc;
 
@@ -10,29 +8,30 @@ use hir_def::{
     adt::VariantData,
     body::scope::ExprScopes,
     builtin_type::BuiltinType,
-    nameres::per_ns::PerNs,
+    docs::Documentation,
+    per_ns::PerNs,
     resolver::{HasResolver, TypeNs},
-    traits::TraitData,
-    type_ref::{Mutability, TypeRef},
-    ContainerId, CrateModuleId, HasModule, ImplId, LocalEnumVariantId, LocalStructFieldId, Lookup,
-    ModuleId, UnionId,
+    type_ref::TypeRef,
+    ContainerId, HasModule, ImplId, LocalEnumVariantId, LocalImportId, LocalModuleId,
+    LocalStructFieldId, Lookup, ModuleId, UnionId,
 };
 use hir_expand::{
     diagnostics::DiagnosticSink,
     name::{self, AsName},
+    AstId,
 };
-use ra_db::{CrateId, Edition};
-use ra_syntax::ast::{self, NameOwner, TypeAscriptionOwner};
+use ra_db::{CrateId, Edition, FileId, FilePosition};
+use ra_syntax::{ast, AstNode, SyntaxNode};
 
 use crate::{
-    db::{AstDatabase, DefDatabase, HirDatabase},
+    db::{DefDatabase, HirDatabase},
     expr::{BindingAnnotation, Body, BodySourceMap, ExprValidator, Pat, PatId},
     ids::{
         AstItemDef, ConstId, EnumId, FunctionId, MacroDefId, StaticId, StructId, TraitId,
         TypeAliasId,
     },
     ty::{InferenceResult, Namespace, TraitRef},
-    Either, HasSource, ImportId, Name, Source, Ty,
+    Either, HasSource, Name, Source, Ty,
 };
 
 /// hir::Crate describes a single crate. It's the main interface with which
@@ -80,6 +79,64 @@ impl Crate {
     }
 }
 
+pub enum ModuleSource {
+    SourceFile(ast::SourceFile),
+    Module(ast::Module),
+}
+
+impl ModuleSource {
+    pub fn new(
+        db: &impl DefDatabase,
+        file_id: Option<FileId>,
+        decl_id: Option<AstId<ast::Module>>,
+    ) -> ModuleSource {
+        match (file_id, decl_id) {
+            (Some(file_id), _) => {
+                let source_file = db.parse(file_id).tree();
+                ModuleSource::SourceFile(source_file)
+            }
+            (None, Some(item_id)) => {
+                let module = item_id.to_node(db);
+                assert!(module.item_list().is_some(), "expected inline module");
+                ModuleSource::Module(module)
+            }
+            (None, None) => panic!(),
+        }
+    }
+
+    // FIXME: this methods do not belong here
+    pub fn from_position(db: &impl DefDatabase, position: FilePosition) -> ModuleSource {
+        let parse = db.parse(position.file_id);
+        match &ra_syntax::algo::find_node_at_offset::<ast::Module>(
+            parse.tree().syntax(),
+            position.offset,
+        ) {
+            Some(m) if !m.has_semi() => ModuleSource::Module(m.clone()),
+            _ => {
+                let source_file = parse.tree();
+                ModuleSource::SourceFile(source_file)
+            }
+        }
+    }
+
+    pub fn from_child_node(db: &impl DefDatabase, child: Source<&SyntaxNode>) -> ModuleSource {
+        if let Some(m) =
+            child.value.ancestors().filter_map(ast::Module::cast).find(|it| !it.has_semi())
+        {
+            ModuleSource::Module(m)
+        } else {
+            let file_id = child.file_id.original_file(db);
+            let source_file = db.parse(file_id).tree();
+            ModuleSource::SourceFile(source_file)
+        }
+    }
+
+    pub fn from_file_id(db: &impl DefDatabase, file_id: FileId) -> ModuleSource {
+        let source_file = db.parse(file_id).tree();
+        ModuleSource::SourceFile(source_file)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Module {
     pub(crate) id: ModuleId,
@@ -111,10 +168,10 @@ impl_froms!(
     BuiltinType
 );
 
-pub use hir_def::ModuleSource;
+pub use hir_def::attr::Attrs;
 
 impl Module {
-    pub(crate) fn new(krate: Crate, crate_module_id: CrateModuleId) -> Module {
+    pub(crate) fn new(krate: Crate, crate_module_id: LocalModuleId) -> Module {
         Module { id: ModuleId { krate: krate.crate_id, module_id: crate_module_id } }
     }
 
@@ -129,17 +186,6 @@ impl Module {
                 None
             }
         })
-    }
-
-    /// Returns the syntax of the last path segment corresponding to this import
-    pub fn import_source(
-        self,
-        db: &impl HirDatabase,
-        import: ImportId,
-    ) -> Either<ast::UseTree, ast::ExternCrateItem> {
-        let src = self.definition_source(db);
-        let (_, source_map) = db.raw_items_with_source_map(src.file_id);
-        source_map.get(&src.value, import)
     }
 
     /// Returns the crate this module is part of.
@@ -191,11 +237,13 @@ impl Module {
     }
 
     /// Returns a `ModuleScope`: a set of items, visible in this module.
-    pub fn scope(self, db: &impl HirDatabase) -> Vec<(Name, ScopeDef, Option<ImportId>)> {
+    pub fn scope(self, db: &impl HirDatabase) -> Vec<(Name, ScopeDef, Option<Import>)> {
         db.crate_def_map(self.id.krate)[self.id.module_id]
             .scope
             .entries()
-            .map(|(name, res)| (name.clone(), res.def.into(), res.import))
+            .map(|(name, res)| {
+                (name.clone(), res.def.into(), res.import.map(|id| Import { parent: self, id }))
+            })
             .collect()
     }
 
@@ -233,9 +281,14 @@ impl Module {
         def_map[self.id.module_id].impls.iter().copied().map(ImplBlock::from).collect()
     }
 
-    fn with_module_id(self, module_id: CrateModuleId) -> Module {
+    fn with_module_id(self, module_id: LocalModuleId) -> Module {
         Module::new(self.krate(), module_id)
     }
+}
+
+pub struct Import {
+    pub(crate) parent: Module,
+    pub(crate) id: LocalImportId,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -561,77 +614,6 @@ pub struct Function {
     pub(crate) id: FunctionId,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FnData {
-    pub(crate) name: Name,
-    pub(crate) params: Vec<TypeRef>,
-    pub(crate) ret_type: TypeRef,
-    /// True if the first param is `self`. This is relevant to decide whether this
-    /// can be called as a method.
-    pub(crate) has_self_param: bool,
-}
-
-impl FnData {
-    pub(crate) fn fn_data_query(
-        db: &(impl DefDatabase + AstDatabase),
-        func: Function,
-    ) -> Arc<FnData> {
-        let src = func.source(db);
-        let name = src.value.name().map(|n| n.as_name()).unwrap_or_else(Name::missing);
-        let mut params = Vec::new();
-        let mut has_self_param = false;
-        if let Some(param_list) = src.value.param_list() {
-            if let Some(self_param) = param_list.self_param() {
-                let self_type = if let Some(type_ref) = self_param.ascribed_type() {
-                    TypeRef::from_ast(type_ref)
-                } else {
-                    let self_type = TypeRef::Path(name::SELF_TYPE.into());
-                    match self_param.kind() {
-                        ast::SelfParamKind::Owned => self_type,
-                        ast::SelfParamKind::Ref => {
-                            TypeRef::Reference(Box::new(self_type), Mutability::Shared)
-                        }
-                        ast::SelfParamKind::MutRef => {
-                            TypeRef::Reference(Box::new(self_type), Mutability::Mut)
-                        }
-                    }
-                };
-                params.push(self_type);
-                has_self_param = true;
-            }
-            for param in param_list.params() {
-                let type_ref = TypeRef::from_ast_opt(param.ascribed_type());
-                params.push(type_ref);
-            }
-        }
-        let ret_type = if let Some(type_ref) = src.value.ret_type().and_then(|rt| rt.type_ref()) {
-            TypeRef::from_ast(type_ref)
-        } else {
-            TypeRef::unit()
-        };
-
-        let sig = FnData { name, params, ret_type, has_self_param };
-        Arc::new(sig)
-    }
-    pub fn name(&self) -> &Name {
-        &self.name
-    }
-
-    pub fn params(&self) -> &[TypeRef] {
-        &self.params
-    }
-
-    pub fn ret_type(&self) -> &TypeRef {
-        &self.ret_type
-    }
-
-    /// True if the first arg is `self`. This is relevant to decide whether this
-    /// can be called as a method.
-    pub fn has_self_param(&self) -> bool {
-        self.has_self_param
-    }
-}
-
 impl Function {
     pub fn module(self, db: &impl DefDatabase) -> Module {
         self.id.lookup(db).module(db).into()
@@ -642,7 +624,15 @@ impl Function {
     }
 
     pub fn name(self, db: &impl HirDatabase) -> Name {
-        self.data(db).name.clone()
+        db.function_data(self.id).name.clone()
+    }
+
+    pub fn has_self_param(self, db: &impl HirDatabase) -> bool {
+        db.function_data(self.id).has_self_param
+    }
+
+    pub fn params(self, db: &impl HirDatabase) -> Vec<TypeRef> {
+        db.function_data(self.id).params.clone()
     }
 
     pub(crate) fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap> {
@@ -655,10 +645,6 @@ impl Function {
 
     pub fn ty(self, db: &impl HirDatabase) -> Ty {
         db.type_for_def(self.into(), Namespace::Values)
-    }
-
-    pub fn data(self, db: &impl HirDatabase) -> Arc<FnData> {
-        db.fn_data(self)
     }
 
     pub fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult> {
@@ -711,12 +697,8 @@ impl Const {
         Some(self.module(db).krate())
     }
 
-    pub fn data(self, db: &impl HirDatabase) -> Arc<ConstData> {
-        db.const_data(self)
-    }
-
     pub fn name(self, db: &impl HirDatabase) -> Option<Name> {
-        self.data(db).name().cloned()
+        db.const_data(self.id).name.clone()
     }
 
     pub fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult> {
@@ -748,45 +730,6 @@ impl Const {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ConstData {
-    pub(crate) name: Option<Name>,
-    pub(crate) type_ref: TypeRef,
-}
-
-impl ConstData {
-    pub fn name(&self) -> Option<&Name> {
-        self.name.as_ref()
-    }
-
-    pub fn type_ref(&self) -> &TypeRef {
-        &self.type_ref
-    }
-
-    pub(crate) fn const_data_query(
-        db: &(impl DefDatabase + AstDatabase),
-        konst: Const,
-    ) -> Arc<ConstData> {
-        let node = konst.source(db).value;
-        const_data_for(&node)
-    }
-
-    pub(crate) fn static_data_query(
-        db: &(impl DefDatabase + AstDatabase),
-        konst: Static,
-    ) -> Arc<ConstData> {
-        let node = konst.source(db).value;
-        const_data_for(&node)
-    }
-}
-
-fn const_data_for<N: NameOwner + TypeAscriptionOwner>(node: &N) -> Arc<ConstData> {
-    let name = node.name().map(|n| n.as_name());
-    let type_ref = TypeRef::from_ast_opt(node.ascribed_type());
-    let sig = ConstData { name, type_ref };
-    Arc::new(sig)
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Static {
     pub(crate) id: StaticId,
@@ -799,10 +742,6 @@ impl Static {
 
     pub fn krate(self, db: &impl DefDatabase) -> Option<Crate> {
         Some(self.module(db).krate())
-    }
-
-    pub fn data(self, db: &impl HirDatabase) -> Arc<ConstData> {
-        db.static_data(self)
     }
 
     pub fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult> {
@@ -821,11 +760,11 @@ impl Trait {
     }
 
     pub fn name(self, db: &impl DefDatabase) -> Option<Name> {
-        self.trait_data(db).name.clone()
+        db.trait_data(self.id).name.clone()
     }
 
     pub fn items(self, db: &impl DefDatabase) -> Vec<AssocItem> {
-        self.trait_data(db).items.iter().map(|it| (*it).into()).collect()
+        db.trait_data(self.id).items.iter().map(|it| (*it).into()).collect()
     }
 
     fn direct_super_traits(self, db: &impl HirDatabase) -> Vec<Trait> {
@@ -871,7 +810,7 @@ impl Trait {
     }
 
     pub fn associated_type_by_name(self, db: &impl DefDatabase, name: &Name) -> Option<TypeAlias> {
-        let trait_data = self.trait_data(db);
+        let trait_data = db.trait_data(self.id);
         let res =
             trait_data.associated_types().map(TypeAlias::from).find(|t| &t.name(db) == name)?;
         Some(res)
@@ -885,16 +824,12 @@ impl Trait {
         self.all_super_traits(db).into_iter().find_map(|t| t.associated_type_by_name(db, name))
     }
 
-    pub(crate) fn trait_data(self, db: &impl DefDatabase) -> Arc<TraitData> {
-        db.trait_data(self.id)
-    }
-
     pub fn trait_ref(self, db: &impl HirDatabase) -> TraitRef {
         TraitRef::for_trait(db, self)
     }
 
     pub fn is_auto(self, db: &impl DefDatabase) -> bool {
-        self.trait_data(db).auto
+        db.trait_data(self.id).auto
     }
 }
 
@@ -937,7 +872,7 @@ impl TypeAlias {
     }
 
     pub fn type_ref(self, db: &impl DefDatabase) -> Option<TypeRef> {
-        db.type_alias_data(self).type_ref.clone()
+        db.type_alias_data(self.id).type_ref.clone()
     }
 
     pub fn ty(self, db: &impl HirDatabase) -> Ty {
@@ -945,7 +880,7 @@ impl TypeAlias {
     }
 
     pub fn name(self, db: &impl DefDatabase) -> Name {
-        db.type_alias_data(self).name.clone()
+        db.type_alias_data(self.id).name.clone()
     }
 }
 
@@ -1108,5 +1043,53 @@ impl From<PerNs> for ScopeDef {
                 def.get_macros().map(|macro_def_id| ScopeDef::MacroDef(macro_def_id.into()))
             })
             .unwrap_or(ScopeDef::Unknown)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AttrDef {
+    Module(Module),
+    StructField(StructField),
+    Adt(Adt),
+    Function(Function),
+    EnumVariant(EnumVariant),
+    Static(Static),
+    Const(Const),
+    Trait(Trait),
+    TypeAlias(TypeAlias),
+    MacroDef(MacroDef),
+}
+
+impl_froms!(
+    AttrDef: Module,
+    StructField,
+    Adt(Struct, Enum, Union),
+    EnumVariant,
+    Static,
+    Const,
+    Function,
+    Trait,
+    TypeAlias,
+    MacroDef
+);
+
+pub trait HasAttrs {
+    fn attrs(self, db: &impl DefDatabase) -> Attrs;
+}
+
+impl<T: Into<AttrDef>> HasAttrs for T {
+    fn attrs(self, db: &impl DefDatabase) -> Attrs {
+        let def: AttrDef = self.into();
+        db.attrs(def.into())
+    }
+}
+
+pub trait Docs {
+    fn docs(&self, db: &impl HirDatabase) -> Option<Documentation>;
+}
+impl<T: Into<AttrDef> + Copy> Docs for T {
+    fn docs(&self, db: &impl HirDatabase) -> Option<Documentation> {
+        let def: AttrDef = (*self).into();
+        db.documentation(def.into())
     }
 }

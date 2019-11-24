@@ -12,19 +12,20 @@ use rustc_hash::FxHashMap;
 use test_utils::tested_by;
 
 use crate::{
-    attr::Attr,
-    db::DefDatabase2,
+    attr::Attrs,
+    db::DefDatabase,
     nameres::{
         diagnostics::DefDiagnostic, mod_resolution::ModDir, path_resolution::ReachedFixedPoint,
-        per_ns::PerNs, raw, CrateDefMap, ModuleData, Resolution, ResolveMode,
+        raw, CrateDefMap, ModuleData, Resolution, ResolveMode,
     },
     path::{Path, PathKind},
-    AdtId, AstId, AstItemDef, ConstLoc, ContainerId, CrateModuleId, EnumId, EnumVariantId,
-    FunctionLoc, ImplId, Intern, LocationCtx, ModuleDefId, ModuleId, StaticId, StructId,
+    per_ns::PerNs,
+    AdtId, AstId, AstItemDef, ConstLoc, ContainerId, EnumId, EnumVariantId, FunctionLoc, ImplId,
+    Intern, LocalImportId, LocalModuleId, LocationCtx, ModuleDefId, ModuleId, StaticId, StructId,
     StructOrUnionId, TraitId, TypeAliasLoc, UnionId,
 };
 
-pub(super) fn collect_defs(db: &impl DefDatabase2, mut def_map: CrateDefMap) -> CrateDefMap {
+pub(super) fn collect_defs(db: &impl DefDatabase, mut def_map: CrateDefMap) -> CrateDefMap {
     let crate_graph = db.crate_graph();
 
     // populate external prelude
@@ -94,10 +95,10 @@ impl MacroStackMonitor {
 struct DefCollector<'a, DB> {
     db: &'a DB,
     def_map: CrateDefMap,
-    glob_imports: FxHashMap<CrateModuleId, Vec<(CrateModuleId, raw::ImportId)>>,
-    unresolved_imports: Vec<(CrateModuleId, raw::ImportId, raw::ImportData)>,
-    unexpanded_macros: Vec<(CrateModuleId, AstId<ast::MacroCall>, Path)>,
-    mod_dirs: FxHashMap<CrateModuleId, ModDir>,
+    glob_imports: FxHashMap<LocalModuleId, Vec<(LocalModuleId, LocalImportId)>>,
+    unresolved_imports: Vec<(LocalModuleId, LocalImportId, raw::ImportData)>,
+    unexpanded_macros: Vec<(LocalModuleId, AstId<ast::MacroCall>, Path)>,
+    mod_dirs: FxHashMap<LocalModuleId, ModDir>,
 
     /// Some macro use `$tt:tt which mean we have to handle the macro perfectly
     /// To prevent stack overflow, we add a deep counter here for prevent that.
@@ -108,7 +109,7 @@ struct DefCollector<'a, DB> {
 
 impl<DB> DefCollector<'_, DB>
 where
-    DB: DefDatabase2,
+    DB: DefDatabase,
 {
     fn collect(&mut self) {
         let crate_graph = self.db.crate_graph();
@@ -173,7 +174,7 @@ where
     /// ```
     fn define_macro(
         &mut self,
-        module_id: CrateModuleId,
+        module_id: LocalModuleId,
         name: Name,
         macro_: MacroDefId,
         export: bool,
@@ -200,7 +201,7 @@ where
     /// the definition of current module.
     /// And also, `macro_use` on a module will import all legacy macros visable inside to
     /// current legacy scope, with possible shadowing.
-    fn define_legacy_macro(&mut self, module_id: CrateModuleId, name: Name, macro_: MacroDefId) {
+    fn define_legacy_macro(&mut self, module_id: LocalModuleId, name: Name, macro_: MacroDefId) {
         // Always shadowing
         self.def_map.modules[module_id].scope.legacy_macros.insert(name, macro_);
     }
@@ -208,7 +209,7 @@ where
     /// Import macros from `#[macro_use] extern crate`.
     fn import_macros_from_extern_crate(
         &mut self,
-        current_module_id: CrateModuleId,
+        current_module_id: LocalModuleId,
         import: &raw::ImportData,
     ) {
         log::debug!(
@@ -235,7 +236,7 @@ where
     /// Exported macros are just all macros in the root module scope.
     /// Note that it contains not only all `#[macro_export]` macros, but also all aliases
     /// created by `use` in the root module, ignoring the visibility of `use`.
-    fn import_all_macros_exported(&mut self, current_module_id: CrateModuleId, krate: CrateId) {
+    fn import_all_macros_exported(&mut self, current_module_id: LocalModuleId, krate: CrateId) {
         let def_map = self.db.crate_def_map(krate);
         for (name, def) in def_map[def_map.root].scope.macros() {
             // `macro_use` only bring things into legacy scope.
@@ -265,7 +266,7 @@ where
 
     fn resolve_import(
         &self,
-        module_id: CrateModuleId,
+        module_id: LocalModuleId,
         import: &raw::ImportData,
     ) -> (PerNs, ReachedFixedPoint) {
         log::debug!("resolving import: {:?} ({:?})", import, self.def_map.edition);
@@ -291,9 +292,9 @@ where
 
     fn record_resolved_import(
         &mut self,
-        module_id: CrateModuleId,
+        module_id: LocalModuleId,
         def: PerNs,
-        import_id: raw::ImportId,
+        import_id: LocalImportId,
         import: &raw::ImportData,
     ) {
         if import.is_glob {
@@ -387,8 +388,8 @@ where
 
     fn update(
         &mut self,
-        module_id: CrateModuleId,
-        import: Option<raw::ImportId>,
+        module_id: LocalModuleId,
+        import: Option<LocalImportId>,
         resolutions: &[(Name, Resolution)],
     ) {
         self.update_recursive(module_id, import, resolutions, 0)
@@ -396,8 +397,8 @@ where
 
     fn update_recursive(
         &mut self,
-        module_id: CrateModuleId,
-        import: Option<raw::ImportId>,
+        module_id: LocalModuleId,
+        import: Option<LocalImportId>,
         resolutions: &[(Name, Resolution)],
         depth: usize,
     ) {
@@ -484,7 +485,7 @@ where
 
     fn collect_macro_expansion(
         &mut self,
-        module_id: CrateModuleId,
+        module_id: LocalModuleId,
         macro_call_id: MacroCallId,
         macro_def_id: MacroDefId,
     ) {
@@ -522,7 +523,7 @@ where
 /// Walks a single module, populating defs, imports and macros
 struct ModCollector<'a, D> {
     def_collector: D,
-    module_id: CrateModuleId,
+    module_id: LocalModuleId,
     file_id: HirFileId,
     raw_items: &'a raw::RawItems,
     mod_dir: ModDir,
@@ -530,7 +531,7 @@ struct ModCollector<'a, D> {
 
 impl<DB> ModCollector<'_, &'_ mut DefCollector<'_, DB>>
 where
-    DB: DefDatabase2,
+    DB: DefDatabase,
 {
     fn collect(&mut self, items: &[raw::RawItem]) {
         // Note: don't assert that inserted value is fresh: it's simply not true
@@ -549,7 +550,7 @@ where
         // `#[macro_use] extern crate` is hoisted to imports macros before collecting
         // any other items.
         for item in items {
-            if self.is_cfg_enabled(item.attrs()) {
+            if self.is_cfg_enabled(&item.attrs) {
                 if let raw::RawItemKind::Import(import_id) = item.kind {
                     let import = self.raw_items[import_id].clone();
                     if import.is_extern_crate && import.is_macro_use {
@@ -560,10 +561,10 @@ where
         }
 
         for item in items {
-            if self.is_cfg_enabled(item.attrs()) {
+            if self.is_cfg_enabled(&item.attrs) {
                 match item.kind {
                     raw::RawItemKind::Module(m) => {
-                        self.collect_module(&self.raw_items[m], item.attrs())
+                        self.collect_module(&self.raw_items[m], &item.attrs)
                     }
                     raw::RawItemKind::Import(import_id) => self
                         .def_collector
@@ -585,9 +586,9 @@ where
         }
     }
 
-    fn collect_module(&mut self, module: &raw::ModuleData, attrs: &[Attr]) {
+    fn collect_module(&mut self, module: &raw::ModuleData, attrs: &Attrs) {
         let path_attr = self.path_attr(attrs);
-        let is_macro_use = self.is_macro_use(attrs);
+        let is_macro_use = attrs.has_atom("macro_use");
         match module {
             // inline module, just recurse
             raw::ModuleData::Definition { name, items, ast_id } => {
@@ -647,7 +648,7 @@ where
         name: Name,
         declaration: AstId<ast::Module>,
         definition: Option<FileId>,
-    ) -> CrateModuleId {
+    ) -> LocalModuleId {
         let modules = &mut self.def_collector.def_map.modules;
         let res = modules.alloc(ModuleData::default());
         modules[res].parent = Some(self.module_id);
@@ -772,23 +773,19 @@ where
         self.def_collector.unexpanded_macros.push((self.module_id, ast_id, path));
     }
 
-    fn import_all_legacy_macros(&mut self, module_id: CrateModuleId) {
+    fn import_all_legacy_macros(&mut self, module_id: LocalModuleId) {
         let macros = self.def_collector.def_map[module_id].scope.legacy_macros.clone();
         for (name, macro_) in macros {
             self.def_collector.define_legacy_macro(self.module_id, name.clone(), macro_);
         }
     }
 
-    fn is_cfg_enabled(&self, attrs: &[Attr]) -> bool {
+    fn is_cfg_enabled(&self, attrs: &Attrs) -> bool {
         attrs.iter().all(|attr| attr.is_cfg_enabled(&self.def_collector.cfg_options) != Some(false))
     }
 
-    fn path_attr<'a>(&self, attrs: &'a [Attr]) -> Option<&'a SmolStr> {
+    fn path_attr<'a>(&self, attrs: &'a Attrs) -> Option<&'a SmolStr> {
         attrs.iter().find_map(|attr| attr.as_path())
-    }
-
-    fn is_macro_use<'a>(&self, attrs: &'a [Attr]) -> bool {
-        attrs.iter().any(|attr| attr.is_simple_atom("macro_use"))
     }
 }
 
@@ -802,12 +799,12 @@ mod tests {
     use ra_db::{fixture::WithFixture, SourceDatabase};
     use rustc_hash::FxHashSet;
 
-    use crate::{db::DefDatabase2, test_db::TestDB};
+    use crate::{db::DefDatabase, test_db::TestDB};
 
     use super::*;
 
     fn do_collect_defs(
-        db: &impl DefDatabase2,
+        db: &impl DefDatabase,
         def_map: CrateDefMap,
         monitor: MacroStackMonitor,
     ) -> CrateDefMap {
@@ -831,7 +828,7 @@ mod tests {
 
         let def_map = {
             let edition = db.crate_graph().edition(krate);
-            let mut modules: Arena<CrateModuleId, ModuleData> = Arena::default();
+            let mut modules: Arena<LocalModuleId, ModuleData> = Arena::default();
             let root = modules.alloc(ModuleData::default());
             CrateDefMap {
                 krate,

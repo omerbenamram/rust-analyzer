@@ -4857,3 +4857,41 @@ fn main() {
     "###
     );
 }
+
+#[test]
+fn infer_builtin_macros_file() {
+    assert_snapshot!(
+        infer(r#"
+#[rustc_builtin_macro]
+macro_rules! file {() => {}}
+
+fn main() {
+    let x = file!();
+}
+"#),
+        @r###"
+    ![0; 2) '""': &str
+    [64; 88) '{     ...!(); }': ()
+    [74; 75) 'x': &str
+    "###
+    );
+}
+
+#[test]
+fn infer_builtin_macros_column() {
+    assert_snapshot!(
+        infer(r#"
+#[rustc_builtin_macro]
+macro_rules! column {() => {}}
+
+fn main() {
+    let x = column!();
+}
+"#),
+        @r###"
+    ![0; 2) '13': i32
+    [66; 92) '{     ...!(); }': ()
+    [76; 77) 'x': i32
+    "###
+    );
+}

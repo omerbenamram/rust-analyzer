@@ -32,11 +32,9 @@ pub mod db;
 pub mod source_binder;
 
 mod ids;
-mod type_alias;
 mod ty;
 mod impl_block;
 mod expr;
-mod lang_item;
 pub mod diagnostics;
 mod util;
 
@@ -52,13 +50,11 @@ mod marks;
 
 pub use crate::{
     code_model::{
-        attrs::{AttrDef, Attrs},
-        docs::{DocDef, Docs, Documentation},
         src::{HasBodySource, HasSource},
-        Adt, AssocItem, Const, ConstData, Container, Crate, CrateDependency, DefWithBody, Enum,
-        EnumVariant, FieldSource, FnData, Function, GenericDef, GenericParam, HasBody, ImplBlock,
-        Local, MacroDef, Module, ModuleDef, ModuleSource, ScopeDef, Static, Struct, StructField,
-        Trait, TypeAlias, Union, VariantDef,
+        Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency, DefWithBody, Docs, Enum,
+        EnumVariant, FieldSource, Function, GenericDef, GenericParam, HasAttrs, HasBody, ImplBlock,
+        Import, Local, MacroDef, Module, ModuleDef, ModuleSource, ScopeDef, Static, Struct,
+        StructField, Trait, TypeAlias, Union, VariantDef,
     },
     expr::ExprScopes,
     from_source::FromSource,
@@ -73,7 +69,7 @@ pub use crate::{
 
 pub use hir_def::{
     builtin_type::BuiltinType,
-    nameres::{per_ns::PerNs, raw::ImportId},
+    docs::Documentation,
     path::{Path, PathKind},
     type_ref::Mutability,
 };
