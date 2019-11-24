@@ -253,21 +253,23 @@ const STYLE: &str = "
 body                { margin: 0; }
 pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padding: 0.4em; }
 
-.comment            { color: #7F9F7F; }
-.string             { color: #CC9393; }
-.function           { color: #93E0E3; }
-.parameter          { color: #94BFF3; }
+.comment            { color: #629755; }
+.string             { color: #6A8759; }
+.field              { color: #9876AA; }
+.function           { color: #FFC66D; }
+.type\\.param       { color: #20999D; }
 .builtin            { color: #DD6718; }
 .text               { color: #DCDCCC; }
-.attribute          { color: #94BFF3; }
-.literal            { color: #BFEBBF; }
-.macro              { color: #94BFF3; }
+.attribute          { color: #BBB529; }
+.literal\\.numeric  { color: #6897BB; }
+.literal\\.char     { color: #6A8759; }
+.macro              { color: #4EADE5; }
 .variable           { color: #DCDCCC; }
 .variable\\.mut     { color: #DCDCCC; text-decoration: underline; }
 
-.keyword            { color: #F0DFAF; }
+.keyword            { color: #CC7832; }
 .keyword\\.unsafe   { color: #DFAF8F; }
-.keyword\\.control  { color: #F0DFAF; font-weight: bold; }
+.keyword\\.control  { color: #CC7832; font-weight: bold; }
 </style>
 ";
 
@@ -280,6 +282,7 @@ mod tests {
     fn test_highlighting() {
         let (analysis, file_id) = single_file(
             r#"
+
 #[derive(Clone, Debug)]
 struct Foo {
     pub x: i32,
@@ -294,6 +297,7 @@ fn foo<T>() -> T {
 // comment
 fn main() {
     println!("Hello, {}!", 92);
+    let e = Option::None;
 
     let mut vec = Vec::new();
     if true {
