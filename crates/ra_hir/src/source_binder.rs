@@ -13,7 +13,9 @@ use hir_def::{
     resolver::{self, resolver_for_scope, HasResolver, Resolver, TypeNs, ValueNs},
     DefWithBodyId,
 };
-use hir_expand::{name::AsName, AstId, MacroCallId, MacroCallLoc, MacroFileKind, Source};
+use hir_expand::{
+    name::AsName, AstId, HirFileId, MacroCallId, MacroCallLoc, MacroFileKind, Source,
+};
 use ra_syntax::{
     ast::{self, AstNode},
     match_ast, AstPtr,
@@ -24,11 +26,10 @@ use ra_syntax::{
 use crate::{
     db::HirDatabase,
     expr::{BodySourceMap, ExprScopes, ScopeId},
-    ids::LocationCtx,
     ty::method_resolution::{self, implements_trait},
     Adt, AssocItem, Const, DefWithBody, Either, Enum, EnumVariant, FromSource, Function,
-    GenericParam, HasBody, HirFileId, Local, MacroDef, Module, Name, Path, ScopeDef, Static,
-    Struct, Trait, Ty, TypeAlias,
+    GenericParam, HasBody, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Ty,
+    TypeAlias,
 };
 
 fn try_get_resolver_for_node(db: &impl HirDatabase, node: Source<&SyntaxNode>) -> Option<Resolver> {
@@ -67,16 +68,12 @@ fn def_with_body_from_child_node(
     db: &impl HirDatabase,
     child: Source<&SyntaxNode>,
 ) -> Option<DefWithBody> {
-    let module_source = crate::ModuleSource::from_child_node(db, child);
-    let module = Module::from_definition(db, Source::new(child.file_id, module_source))?;
-    let ctx = LocationCtx::new(db, module.id, child.file_id);
-
     child.value.ancestors().find_map(|node| {
         match_ast! {
             match node {
                 ast::FnDef(def)  => { return Function::from_source(db, child.with_value(def)).map(DefWithBody::from); },
                 ast::ConstDef(def) => { return Const::from_source(db, child.with_value(def)).map(DefWithBody::from); },
-                ast::StaticDef(def) => { Some(Static { id: ctx.to_def(&def) }.into()) },
+                ast::StaticDef(def) => { return Static::from_source(db, child.with_value(def)).map(DefWithBody::from); },
                 _ => { None },
             }
         }
@@ -544,7 +541,7 @@ fn adjust(
 }
 
 /// Given a `ast::MacroCall`, return what `MacroKindFile` it belongs to.
-/// FIXME: Not completed  
+/// FIXME: Not completed
 fn to_macro_file_kind(macro_call: &ast::MacroCall) -> MacroFileKind {
     let syn = macro_call.syntax();
     let parent = match syn.parent() {
