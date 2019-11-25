@@ -6,15 +6,14 @@ use std::sync::Arc;
 
 use hir_def::{
     adt::VariantData,
-    body::scope::ExprScopes,
     builtin_type::BuiltinType,
     docs::Documentation,
     per_ns::PerNs,
     resolver::{HasResolver, TypeNs},
     type_ref::TypeRef,
-    AstItemDef, ConstId, ContainerId, EnumId, FunctionId, HasModule, ImplId, LocalEnumVariantId,
-    LocalImportId, LocalModuleId, LocalStructFieldId, Lookup, ModuleId, StaticId, StructId,
-    TraitId, TypeAliasId, UnionId,
+    AstItemDef, ConstId, ContainerId, EnumId, FunctionId, GenericDefId, HasModule, ImplId,
+    LocalEnumVariantId, LocalImportId, LocalModuleId, LocalStructFieldId, Lookup, ModuleId,
+    StaticId, StructId, TraitId, TypeAliasId, UnionId,
 };
 use hir_expand::{
     diagnostics::DiagnosticSink,
@@ -28,7 +27,7 @@ use crate::{
     db::{DefDatabase, HirDatabase},
     expr::{BindingAnnotation, Body, BodySourceMap, ExprValidator, Pat, PatId},
     ty::{InferenceResult, Namespace, TraitRef},
-    Either, HasSource, Name, Source, Ty,
+    Either, Name, Source, Ty,
 };
 
 /// hir::Crate describes a single crate. It's the main interface with which
@@ -302,11 +301,11 @@ pub enum FieldSource {
 
 impl StructField {
     pub fn name(&self, db: &impl HirDatabase) -> Name {
-        self.parent.variant_data(db).fields().unwrap()[self.id].name.clone()
+        self.parent.variant_data(db).fields()[self.id].name.clone()
     }
 
     pub fn ty(&self, db: &impl HirDatabase) -> Ty {
-        db.type_for_field(*self)
+        db.field_types(self.parent.into())[self.id].clone()
     }
 
     pub fn parent_def(&self, _db: &impl HirDatabase) -> VariantDef {
@@ -321,7 +320,7 @@ pub struct Struct {
 
 impl Struct {
     pub fn module(self, db: &impl DefDatabase) -> Module {
-        Module { id: self.id.0.module(db) }
+        Module { id: self.id.module(db) }
     }
 
     pub fn krate(self, db: &impl DefDatabase) -> Option<Crate> {
@@ -336,8 +335,7 @@ impl Struct {
         db.struct_data(self.id.into())
             .variant_data
             .fields()
-            .into_iter()
-            .flat_map(|it| it.iter())
+            .iter()
             .map(|(id, _)| StructField { parent: self.into(), id })
             .collect()
     }
@@ -346,8 +344,7 @@ impl Struct {
         db.struct_data(self.id.into())
             .variant_data
             .fields()
-            .into_iter()
-            .flat_map(|it| it.iter())
+            .iter()
             .find(|(_id, data)| data.name == *name)
             .map(|(id, _)| StructField { parent: self.into(), id })
     }
@@ -372,11 +369,11 @@ pub struct Union {
 
 impl Union {
     pub fn name(self, db: &impl DefDatabase) -> Option<Name> {
-        db.struct_data(self.id.into()).name.clone()
+        db.union_data(self.id).name.clone()
     }
 
     pub fn module(self, db: &impl DefDatabase) -> Module {
-        Module { id: self.id.0.module(db) }
+        Module { id: self.id.module(db) }
     }
 
     pub fn ty(self, db: &impl HirDatabase) -> Ty {
@@ -444,8 +441,7 @@ impl EnumVariant {
     pub fn fields(self, db: &impl HirDatabase) -> Vec<StructField> {
         self.variant_data(db)
             .fields()
-            .into_iter()
-            .flat_map(|it| it.iter())
+            .iter()
             .map(|(id, _)| StructField { parent: self.into(), id })
             .collect()
     }
@@ -453,8 +449,7 @@ impl EnumVariant {
     pub fn field(self, db: &impl HirDatabase, name: &Name) -> Option<StructField> {
         self.variant_data(db)
             .fields()
-            .into_iter()
-            .flat_map(|it| it.iter())
+            .iter()
             .find(|(_id, data)| data.name == *name)
             .map(|(id, _)| StructField { parent: self.into(), id })
     }
@@ -560,52 +555,6 @@ impl DefWithBody {
     }
 }
 
-pub trait HasBody: Copy {
-    fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult>;
-    fn body(self, db: &impl HirDatabase) -> Arc<Body>;
-    fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap>;
-    fn expr_scopes(self, db: &impl HirDatabase) -> Arc<ExprScopes>;
-}
-
-impl<T> HasBody for T
-where
-    T: Into<DefWithBody> + Copy + HasSource,
-{
-    fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult> {
-        db.infer(self.into())
-    }
-
-    fn body(self, db: &impl HirDatabase) -> Arc<Body> {
-        self.into().body(db)
-    }
-
-    fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap> {
-        self.into().body_source_map(db)
-    }
-
-    fn expr_scopes(self, db: &impl HirDatabase) -> Arc<ExprScopes> {
-        self.into().expr_scopes(db)
-    }
-}
-
-impl HasBody for DefWithBody {
-    fn infer(self, db: &impl HirDatabase) -> Arc<InferenceResult> {
-        db.infer(self)
-    }
-
-    fn body(self, db: &impl HirDatabase) -> Arc<Body> {
-        db.body(self.into())
-    }
-
-    fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap> {
-        db.body_with_source_map(self.into()).1
-    }
-
-    fn expr_scopes(self, db: &impl HirDatabase) -> Arc<ExprScopes> {
-        db.expr_scopes(self.into())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Function {
     pub(crate) id: FunctionId,
@@ -632,7 +581,7 @@ impl Function {
         db.function_data(self.id).params.clone()
     }
 
-    pub(crate) fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap> {
+    pub fn body_source_map(self, db: &impl HirDatabase) -> Arc<BodySourceMap> {
         db.body_with_source_map(self.id.into()).1
     }
 
@@ -948,16 +897,6 @@ impl_froms!(
     Const
 );
 
-impl From<AssocItem> for GenericDef {
-    fn from(item: AssocItem) -> Self {
-        match item {
-            AssocItem::Function(f) => f.into(),
-            AssocItem::Const(c) => c.into(),
-            AssocItem::TypeAlias(t) => t.into(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Local {
     pub(crate) parent: DefWithBody,
@@ -966,7 +905,7 @@ pub struct Local {
 
 impl Local {
     pub fn name(self, db: &impl HirDatabase) -> Option<Name> {
-        let body = self.parent.body(db);
+        let body = db.body(self.parent.into());
         match &body[self.pat_id] {
             Pat::Bind { name, .. } => Some(name.clone()),
             _ => None,
@@ -978,7 +917,7 @@ impl Local {
     }
 
     pub fn is_mut(self, db: &impl HirDatabase) -> bool {
-        let body = self.parent.body(db);
+        let body = db.body(self.parent.into());
         match &body[self.pat_id] {
             Pat::Bind { mode, .. } => match mode {
                 BindingAnnotation::Mutable | BindingAnnotation::RefMut => true,
@@ -1002,7 +941,7 @@ impl Local {
     }
 
     pub fn source(self, db: &impl HirDatabase) -> Source<Either<ast::BindPat, ast::SelfParam>> {
-        let source_map = self.parent.body_source_map(db);
+        let (_body, source_map) = db.body_with_source_map(self.parent.into());
         let src = source_map.pat_syntax(self.pat_id).unwrap(); // Hmm...
         let root = src.file_syntax(db);
         src.map(|ast| ast.map(|it| it.cast().unwrap().to_node(&root), |it| it.to_node(&root)))
@@ -1011,13 +950,48 @@ impl Local {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GenericParam {
-    pub(crate) parent: GenericDef,
+    pub(crate) parent: GenericDefId,
     pub(crate) idx: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ImplBlock {
     pub(crate) id: ImplId,
+}
+
+impl ImplBlock {
+    pub fn target_trait(&self, db: &impl DefDatabase) -> Option<TypeRef> {
+        db.impl_data(self.id).target_trait.clone()
+    }
+
+    pub fn target_type(&self, db: &impl DefDatabase) -> TypeRef {
+        db.impl_data(self.id).target_type.clone()
+    }
+
+    pub fn target_ty(&self, db: &impl HirDatabase) -> Ty {
+        Ty::from_hir(db, &self.id.resolver(db), &self.target_type(db))
+    }
+
+    pub fn target_trait_ref(&self, db: &impl HirDatabase) -> Option<TraitRef> {
+        let target_ty = self.target_ty(db);
+        TraitRef::from_hir(db, &self.id.resolver(db), &self.target_trait(db)?, Some(target_ty))
+    }
+
+    pub fn items(&self, db: &impl DefDatabase) -> Vec<AssocItem> {
+        db.impl_data(self.id).items.iter().map(|it| (*it).into()).collect()
+    }
+
+    pub fn is_negative(&self, db: &impl DefDatabase) -> bool {
+        db.impl_data(self.id).is_negative
+    }
+
+    pub fn module(&self, db: &impl DefDatabase) -> Module {
+        self.id.module(db).into()
+    }
+
+    pub fn krate(&self, db: &impl DefDatabase) -> Crate {
+        Crate { crate_id: self.module(db).id.krate }
+    }
 }
 
 /// For IDE only

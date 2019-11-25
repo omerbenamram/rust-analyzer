@@ -141,30 +141,26 @@ impl Lookup for FunctionId {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StructOrUnionId(salsa::InternId);
-impl_intern_key!(StructOrUnionId);
-impl AstItemDef<ast::StructDef> for StructOrUnionId {
+pub struct StructId(salsa::InternId);
+impl_intern_key!(StructId);
+impl AstItemDef<ast::StructDef> for StructId {
     fn intern(db: &impl InternDatabase, loc: ItemLoc<ast::StructDef>) -> Self {
-        db.intern_struct_or_union(loc)
+        db.intern_struct(loc)
     }
     fn lookup_intern(self, db: &impl InternDatabase) -> ItemLoc<ast::StructDef> {
-        db.lookup_intern_struct_or_union(self)
+        db.lookup_intern_struct(self)
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct StructId(pub StructOrUnionId);
-impl From<StructId> for StructOrUnionId {
-    fn from(id: StructId) -> StructOrUnionId {
-        id.0
+pub struct UnionId(salsa::InternId);
+impl_intern_key!(UnionId);
+impl AstItemDef<ast::UnionDef> for UnionId {
+    fn intern(db: &impl InternDatabase, loc: ItemLoc<ast::UnionDef>) -> Self {
+        db.intern_union(loc)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct UnionId(pub StructOrUnionId);
-impl From<UnionId> for StructOrUnionId {
-    fn from(id: UnionId) -> StructOrUnionId {
-        id.0
+    fn lookup_intern(self, db: &impl InternDatabase) -> ItemLoc<ast::UnionDef> {
+        db.lookup_intern_union(self)
     }
 }
 
@@ -190,12 +186,6 @@ pub struct EnumVariantId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LocalEnumVariantId(RawId);
 impl_arena_id!(LocalEnumVariantId);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VariantId {
-    EnumVariantId(EnumVariantId),
-    StructId(StructId),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StructFieldId {
@@ -437,6 +427,14 @@ impl_froms!(
     ImplId
 );
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VariantId {
+    EnumVariantId(EnumVariantId),
+    StructId(StructId),
+    UnionId(UnionId),
+}
+impl_froms!(VariantId: EnumVariantId, StructId);
+
 trait Intern {
     type ID;
     fn intern(self, db: &impl db::DefDatabase) -> Self::ID;
@@ -477,6 +475,16 @@ impl HasModule for ConstLoc {
             ContainerId::ModuleId(it) => it,
             ContainerId::ImplId(it) => it.module(db),
             ContainerId::TraitId(it) => it.module(db),
+        }
+    }
+}
+
+impl HasModule for AdtId {
+    fn module(&self, db: &impl db::DefDatabase) -> ModuleId {
+        match self {
+            AdtId::StructId(it) => it.module(db),
+            AdtId::UnionId(it) => it.module(db),
+            AdtId::EnumId(it) => it.module(db),
         }
     }
 }

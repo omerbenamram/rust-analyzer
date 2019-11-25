@@ -34,7 +34,6 @@ use ra_prof::profile;
 use test_utils::tested_by;
 
 use super::{
-    lower,
     traits::{Guidance, Obligation, ProjectionPredicate, Solution},
     ApplicationTy, InEnvironment, ProjectionTy, Substs, TraitEnvironment, TraitRef, Ty, TypableDef,
     TypeCtor, TypeWalk, Uncertain,
@@ -44,8 +43,7 @@ use crate::{
     db::HirDatabase,
     expr::{BindingAnnotation, Body, ExprId, PatId},
     ty::infer::diagnostics::InferenceDiagnostic,
-    Adt, AssocItem, DefWithBody, FloatTy, Function, HasBody, IntTy, Path, StructField, Trait,
-    VariantDef,
+    Adt, AssocItem, DefWithBody, FloatTy, Function, IntTy, Path, StructField, Trait, VariantDef,
 };
 
 macro_rules! ty_app {
@@ -217,11 +215,11 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
             var_unification_table: InPlaceUnificationTable::new(),
             obligations: Vec::default(),
             return_ty: Ty::Unknown, // set in collect_fn_signature
-            trait_env: lower::trait_env(db, &resolver),
+            trait_env: TraitEnvironment::lower(db, &resolver),
             coerce_unsized_map: Self::init_coerce_unsized_map(db, &resolver),
             db,
             owner,
-            body: owner.body(db),
+            body: db.body(owner.into()),
             resolver,
         }
     }

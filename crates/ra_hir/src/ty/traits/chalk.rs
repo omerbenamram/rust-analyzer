@@ -9,7 +9,7 @@ use chalk_ir::{
 };
 use chalk_rust_ir::{AssociatedTyDatum, AssociatedTyValue, ImplDatum, StructDatum, TraitDatum};
 
-use hir_def::lang_item::LangItemTarget;
+use hir_def::{lang_item::LangItemTarget, GenericDefId};
 use hir_expand::name;
 
 use ra_db::salsa::{InternId, InternKey};
@@ -19,7 +19,7 @@ use crate::{
     db::HirDatabase,
     ty::display::HirDisplay,
     ty::{ApplicationTy, GenericPredicate, ProjectionTy, Substs, TraitRef, Ty, TypeCtor, TypeWalk},
-    Crate, GenericDef, HasBody, ImplBlock, Trait, TypeAlias,
+    Crate, ImplBlock, Trait, TypeAlias,
 };
 
 /// This represents a trait whose name we could not resolve.
@@ -402,7 +402,7 @@ fn make_binders<T>(value: T, num_vars: usize) -> chalk_ir::Binders<T> {
 
 fn convert_where_clauses(
     db: &impl HirDatabase,
-    def: GenericDef,
+    def: GenericDefId,
     substs: &Substs,
 ) -> Vec<chalk_ir::QuantifiedWhereClause<ChalkIr>> {
     let generic_predicates = db.generic_predicates(def);
@@ -561,7 +561,7 @@ pub(crate) fn trait_datum_query(
         marker: false,
         fundamental: false,
     };
-    let where_clauses = convert_where_clauses(db, trait_.into(), &bound_vars);
+    let where_clauses = convert_where_clauses(db, trait_.id.into(), &bound_vars);
     let associated_ty_ids = trait_
         .items(db)
         .into_iter()
@@ -643,7 +643,7 @@ fn impl_block_datum(
     } else {
         chalk_rust_ir::ImplType::External
     };
-    let where_clauses = convert_where_clauses(db, impl_block.into(), &bound_vars);
+    let where_clauses = convert_where_clauses(db, impl_block.id.into(), &bound_vars);
     let negative = impl_block.is_negative(db);
     debug!(
         "impl {:?}: {}{} where {:?}",
@@ -715,7 +715,7 @@ fn closure_fn_trait_impl_datum(
     let fn_once_trait = get_fn_trait(db, krate, super::FnTrait::FnOnce)?;
     fn_once_trait.associated_type_by_name(db, &name::OUTPUT_TYPE)?;
 
-    let num_args: u16 = match &data.def.body(db)[data.expr] {
+    let num_args: u16 = match &db.body(data.def.into())[data.expr] {
         crate::expr::Expr::Lambda { args, .. } => args.len() as u16,
         _ => {
             log::warn!("closure for closure type {:?} not found", data);
@@ -736,7 +736,7 @@ fn closure_fn_trait_impl_datum(
 
     let trait_ref = TraitRef {
         trait_,
-        substs: Substs::build_for_def(db, trait_).push(self_ty).push(arg_ty).build(),
+        substs: Substs::build_for_def(db, trait_.id).push(self_ty).push(arg_ty).build(),
     };
 
     let output_ty_id = AssocTyValue::ClosureFnTraitImplOutput(data.clone()).to_chalk(db);
@@ -805,7 +805,7 @@ fn closure_fn_trait_output_assoc_ty_value(
 ) -> Arc<AssociatedTyValue<ChalkIr>> {
     let impl_id = Impl::ClosureFnTraitImpl(data.clone()).to_chalk(db);
 
-    let num_args: u16 = match &data.def.body(db)[data.expr] {
+    let num_args: u16 = match &db.body(data.def.into())[data.expr] {
         crate::expr::Expr::Lambda { args, .. } => args.len() as u16,
         _ => {
             log::warn!("closure for closure type {:?} not found", data);

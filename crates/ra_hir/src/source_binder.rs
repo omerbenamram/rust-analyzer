@@ -26,10 +26,12 @@ use ra_syntax::{
 use crate::{
     db::HirDatabase,
     expr::{BodySourceMap, ExprScopes, ScopeId},
-    ty::method_resolution::{self, implements_trait},
+    ty::{
+        method_resolution::{self, implements_trait},
+        TraitEnvironment,
+    },
     Adt, AssocItem, Const, DefWithBody, Either, Enum, EnumVariant, FromSource, Function,
-    GenericParam, HasBody, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Ty,
-    TypeAlias,
+    GenericParam, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Ty, TypeAlias,
 };
 
 fn try_get_resolver_for_node(db: &impl HirDatabase, node: Source<&SyntaxNode>) -> Option<Resolver> {
@@ -155,8 +157,8 @@ impl SourceAnalyzer {
     ) -> SourceAnalyzer {
         let def_with_body = def_with_body_from_child_node(db, node);
         if let Some(def) = def_with_body {
-            let source_map = def.body_source_map(db);
-            let scopes = def.expr_scopes(db);
+            let (_body, source_map) = db.body_with_source_map(def.into());
+            let scopes = db.expr_scopes(def.into());
             let scope = match offset {
                 None => scope_for(&scopes, &source_map, node),
                 Some(offset) => scope_for_offset(&scopes, &source_map, node.with_value(offset)),
@@ -166,7 +168,7 @@ impl SourceAnalyzer {
                 resolver,
                 body_owner: Some(def),
                 body_source_map: Some(source_map),
-                infer: Some(def.infer(db)),
+                infer: Some(db.infer(def)),
                 scopes: Some(scopes),
                 file_id: node.file_id,
             }
@@ -249,7 +251,7 @@ impl SourceAnalyzer {
         let types = self.resolver.resolve_path_in_type_ns_fully(db, &path).map(|ty| match ty {
             TypeNs::SelfType(it) => PathResolution::SelfType(it.into()),
             TypeNs::GenericParam(idx) => PathResolution::GenericParam(GenericParam {
-                parent: self.resolver.generic_def().unwrap().into(),
+                parent: self.resolver.generic_def().unwrap(),
                 idx,
             }),
             TypeNs::AdtSelfType(it) | TypeNs::AdtId(it) => {
@@ -324,7 +326,7 @@ impl SourceAnalyzer {
                 resolver::ScopeDef::ImplSelfType(it) => ScopeDef::ImplSelfType(it.into()),
                 resolver::ScopeDef::AdtSelfType(it) => ScopeDef::AdtSelfType(it.into()),
                 resolver::ScopeDef::GenericParam(idx) => {
-                    let parent = self.resolver.generic_def().unwrap().into();
+                    let parent = self.resolver.generic_def().unwrap();
                     ScopeDef::GenericParam(GenericParam { parent, idx })
                 }
                 resolver::ScopeDef::Local(pat_id) => {
@@ -409,7 +411,10 @@ impl SourceAnalyzer {
         // There should be no inference vars in types passed here
         // FIXME check that?
         let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
-        crate::ty::autoderef(db, &self.resolver, canonical).map(|canonical| canonical.value)
+        let krate = self.resolver.krate();
+        let environment = TraitEnvironment::lower(db, &self.resolver);
+        let ty = crate::ty::InEnvironment { value: canonical, environment };
+        crate::ty::autoderef(db, krate, ty).map(|canonical| canonical.value)
     }
 
     /// Checks that particular type `ty` implements `std::future::Future`.

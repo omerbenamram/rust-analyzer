@@ -1,6 +1,6 @@
 //! FIXME: write short doc here
 
-use hir_def::{AstItemDef, LocationCtx, ModuleId, StructId, StructOrUnionId, UnionId};
+use hir_def::{AstItemDef, LocationCtx, ModuleId};
 use hir_expand::{name::AsName, AstId, MacroDefId, MacroDefKind};
 use ra_syntax::{
     ast::{self, AstNode, NameOwner},
@@ -9,9 +9,9 @@ use ra_syntax::{
 
 use crate::{
     db::{AstDatabase, DefDatabase, HirDatabase},
-    AssocItem, Const, DefWithBody, Enum, EnumVariant, FieldSource, Function, HasBody, HasSource,
-    ImplBlock, Local, MacroDef, Module, ModuleDef, ModuleSource, Source, Static, Struct,
-    StructField, Trait, TypeAlias, Union, VariantDef,
+    AssocItem, Const, DefWithBody, Enum, EnumVariant, FieldSource, Function, HasSource, ImplBlock,
+    Local, MacroDef, Module, ModuleDef, ModuleSource, Source, Static, Struct, StructField, Trait,
+    TypeAlias, Union, VariantDef,
 };
 
 pub trait FromSource: Sized {
@@ -19,19 +19,18 @@ pub trait FromSource: Sized {
     fn from_source(db: &(impl DefDatabase + AstDatabase), src: Source<Self::Ast>) -> Option<Self>;
 }
 
-// FIXIME: these two impls are wrong, `ast::StructDef` might produce either a struct or a union
 impl FromSource for Struct {
     type Ast = ast::StructDef;
     fn from_source(db: &(impl DefDatabase + AstDatabase), src: Source<Self::Ast>) -> Option<Self> {
-        let id: StructOrUnionId = from_source(db, src)?;
-        Some(Struct { id: StructId(id) })
+        let id = from_source(db, src)?;
+        Some(Struct { id })
     }
 }
 impl FromSource for Union {
-    type Ast = ast::StructDef;
+    type Ast = ast::UnionDef;
     fn from_source(db: &(impl DefDatabase + AstDatabase), src: Source<Self::Ast>) -> Option<Self> {
-        let id: StructOrUnionId = from_source(db, src)?;
-        Some(Union { id: UnionId(id) })
+        let id = from_source(db, src)?;
+        Some(Union { id })
     }
 }
 impl FromSource for Enum {
@@ -200,8 +199,7 @@ impl FromSource for StructField {
         variant_def
             .variant_data(db)
             .fields()
-            .into_iter()
-            .flat_map(|it| it.iter())
+            .iter()
             .map(|(id, _)| StructField { parent: variant_def, id })
             .find(|f| f.source(db) == src)
     }
@@ -221,7 +219,7 @@ impl Local {
             };
             Some(res)
         })?;
-        let source_map = parent.body_source_map(db);
+        let (_body, source_map) = db.body_with_source_map(parent.into());
         let src = src.map(ast::Pat::from);
         let pat_id = source_map.node_pat(src.as_ref())?;
         Some(Local { parent, pat_id })

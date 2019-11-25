@@ -8,6 +8,7 @@ use hir_def::{
     generics::GenericParams,
     path::{GenericArg, GenericArgs},
     resolver::resolver_for_expr,
+    ContainerId, Lookup,
 };
 use hir_expand::name;
 
@@ -15,9 +16,9 @@ use crate::{
     db::HirDatabase,
     expr::{Array, BinaryOp, Expr, ExprId, Literal, Statement, UnaryOp},
     ty::{
-        autoderef, method_resolution, op, CallableDef, InferTy, IntTy, Mutability, Namespace,
-        Obligation, ProjectionPredicate, ProjectionTy, Substs, TraitRef, Ty, TypeCtor, TypeWalk,
-        Uncertain,
+        autoderef, method_resolution, op, traits::InEnvironment, CallableDef, InferTy, IntTy,
+        Mutability, Namespace, Obligation, ProjectionPredicate, ProjectionTy, Substs, TraitRef, Ty,
+        TypeCtor, TypeWalk, Uncertain,
     },
     Adt, Name,
 };
@@ -214,6 +215,8 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
                 self.unify(&ty, &expected.ty);
 
                 let substs = ty.substs().unwrap_or_else(Substs::empty);
+                let field_types =
+                    def_id.map(|it| self.db.field_types(it.into())).unwrap_or_default();
                 for (field_idx, field) in fields.iter().enumerate() {
                     let field_def = def_id.and_then(|it| match it.field(self.db, &field.name) {
                         Some(field) => Some(field),
@@ -228,8 +231,9 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
                     if let Some(field_def) = field_def {
                         self.result.record_field_resolutions.insert(field.expr, field_def);
                     }
-                    let field_ty =
-                        field_def.map_or(Ty::Unknown, |field| field.ty(self.db)).subst(&substs);
+                    let field_ty = field_def
+                        .map_or(Ty::Unknown, |it| field_types[it.id].clone())
+                        .subst(&substs);
                     self.infer_expr_coerce(field.expr, &Expectation::has_type(field_ty));
                 }
                 if let Some(expr) = spread {
@@ -242,8 +246,11 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
                 let canonicalized = self.canonicalizer().canonicalize_ty(receiver_ty);
                 let ty = autoderef::autoderef(
                     self.db,
-                    &self.resolver.clone(),
-                    canonicalized.value.clone(),
+                    self.resolver.krate(),
+                    InEnvironment {
+                        value: canonicalized.value.clone(),
+                        environment: self.trait_env.clone(),
+                    },
                 )
                 .find_map(|derefed_ty| match canonicalized.decanonicalize_ty(derefed_ty.value) {
                     Ty::Apply(a_ty) => match a_ty.ctor {
@@ -252,8 +259,12 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
                             .and_then(|idx| a_ty.parameters.0.get(idx).cloned()),
                         TypeCtor::Adt(Adt::Struct(s)) => s.field(self.db, name).map(|field| {
                             self.write_field_resolution(tgt_expr, field);
-                            field.ty(self.db).subst(&a_ty.parameters)
+                            self.db.field_types(s.id.into())[field.id]
+                                .clone()
+                                .subst(&a_ty.parameters)
                         }),
+                        // FIXME:
+                        TypeCtor::Adt(Adt::Union(_)) => None,
                         _ => None,
                     },
                     _ => None,
@@ -332,16 +343,25 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
             Expr::UnaryOp { expr, op } => {
                 let inner_ty = self.infer_expr(*expr, &Expectation::none());
                 match op {
-                    UnaryOp::Deref => {
-                        let canonicalized = self.canonicalizer().canonicalize_ty(inner_ty);
-                        if let Some(derefed_ty) =
-                            autoderef::deref(self.db, &self.resolver, &canonicalized.value)
-                        {
-                            canonicalized.decanonicalize_ty(derefed_ty.value)
-                        } else {
-                            Ty::Unknown
+                    UnaryOp::Deref => match self.resolver.krate() {
+                        Some(krate) => {
+                            let canonicalized = self.canonicalizer().canonicalize_ty(inner_ty);
+                            match autoderef::deref(
+                                self.db,
+                                krate,
+                                InEnvironment {
+                                    value: &canonicalized.value,
+                                    environment: self.trait_env.clone(),
+                                },
+                            ) {
+                                Some(derefed_ty) => {
+                                    canonicalized.decanonicalize_ty(derefed_ty.value)
+                                }
+                                None => Ty::Unknown,
+                            }
                         }
-                    }
+                        None => Ty::Unknown,
+                    },
                     UnaryOp::Neg => {
                         match &inner_ty {
                             Ty::Apply(a_ty) => match a_ty.ctor {
@@ -643,18 +663,21 @@ impl<'a, D: HirDatabase> InferenceContext<'a, D> {
                 }
                 // add obligation for trait implementation, if this is a trait method
                 match def {
-                    CallableDef::Function(f) => {
-                        if let Some(trait_) = f.parent_trait(self.db) {
+                    CallableDef::FunctionId(f) => {
+                        if let ContainerId::TraitId(trait_) = f.lookup(self.db).container {
                             // construct a TraitDef
                             let substs = a_ty.parameters.prefix(
                                 self.db
-                                    .generic_params(trait_.id.into())
+                                    .generic_params(trait_.into())
                                     .count_params_including_parent(),
                             );
-                            self.obligations.push(Obligation::Trait(TraitRef { trait_, substs }));
+                            self.obligations.push(Obligation::Trait(TraitRef {
+                                trait_: trait_.into(),
+                                substs,
+                            }));
                         }
                     }
-                    CallableDef::Struct(_) | CallableDef::EnumVariant(_) => {}
+                    CallableDef::StructId(_) | CallableDef::EnumVariantId(_) => {}
                 }
             }
         }

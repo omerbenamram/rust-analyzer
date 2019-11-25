@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use ra_arena::map::ArenaMap;
 use ra_db::salsa;
 
 use crate::{
@@ -11,15 +12,19 @@ use crate::{
         CallableDef, FnSig, GenericPredicate, InferenceResult, Namespace, Substs, Ty, TypableDef,
         TypeCtor,
     },
-    Crate, DefWithBody, GenericDef, ImplBlock, StructField, Trait,
+    Crate, DefWithBody, ImplBlock, Trait,
 };
 
-pub use hir_def::db::{
-    BodyQuery, BodyWithSourceMapQuery, ConstDataQuery, CrateDefMapQuery, CrateLangItemsQuery,
-    DefDatabase, DefDatabaseStorage, DocumentationQuery, EnumDataQuery, ExprScopesQuery,
-    FunctionDataQuery, GenericParamsQuery, ImplDataQuery, InternDatabase, InternDatabaseStorage,
-    LangItemQuery, ModuleLangItemsQuery, RawItemsQuery, RawItemsWithSourceMapQuery,
-    StaticDataQuery, StructDataQuery, TraitDataQuery, TypeAliasDataQuery,
+pub use hir_def::{
+    db::{
+        BodyQuery, BodyWithSourceMapQuery, ConstDataQuery, CrateDefMapQuery, CrateLangItemsQuery,
+        DefDatabase, DefDatabaseStorage, DocumentationQuery, EnumDataQuery, ExprScopesQuery,
+        FunctionDataQuery, GenericParamsQuery, ImplDataQuery, InternDatabase,
+        InternDatabaseStorage, LangItemQuery, ModuleLangItemsQuery, RawItemsQuery,
+        RawItemsWithSourceMapQuery, StaticDataQuery, StructDataQuery, TraitDataQuery,
+        TypeAliasDataQuery,
+    },
+    GenericDefId, LocalStructFieldId, VariantId,
 };
 pub use hir_expand::db::{
     AstDatabase, AstDatabaseStorage, AstIdMapQuery, MacroArgQuery, MacroDefQuery, MacroExpandQuery,
@@ -35,8 +40,8 @@ pub trait HirDatabase: DefDatabase {
     #[salsa::invoke(crate::ty::type_for_def)]
     fn type_for_def(&self, def: TypableDef, ns: Namespace) -> Ty;
 
-    #[salsa::invoke(crate::ty::type_for_field)]
-    fn type_for_field(&self, field: StructField) -> Ty;
+    #[salsa::invoke(crate::ty::field_types_query)]
+    fn field_types(&self, var: VariantId) -> Arc<ArenaMap<LocalStructFieldId, Ty>>;
 
     #[salsa::invoke(crate::ty::callable_item_sig)]
     fn callable_item_signature(&self, def: CallableDef) -> FnSig;
@@ -44,15 +49,15 @@ pub trait HirDatabase: DefDatabase {
     #[salsa::invoke(crate::ty::generic_predicates_for_param_query)]
     fn generic_predicates_for_param(
         &self,
-        def: GenericDef,
+        def: GenericDefId,
         param_idx: u32,
     ) -> Arc<[GenericPredicate]>;
 
     #[salsa::invoke(crate::ty::generic_predicates_query)]
-    fn generic_predicates(&self, def: GenericDef) -> Arc<[GenericPredicate]>;
+    fn generic_predicates(&self, def: GenericDefId) -> Arc<[GenericPredicate]>;
 
     #[salsa::invoke(crate::ty::generic_defaults_query)]
-    fn generic_defaults(&self, def: GenericDef) -> Substs;
+    fn generic_defaults(&self, def: GenericDefId) -> Substs;
 
     #[salsa::invoke(crate::ty::method_resolution::CrateImplBlocks::impls_in_crate_query)]
     fn impls_in_crate(&self, krate: Crate) -> Arc<CrateImplBlocks>;

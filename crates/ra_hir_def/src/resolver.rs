@@ -18,8 +18,8 @@ use crate::{
     path::{Path, PathKind},
     per_ns::PerNs,
     AdtId, AstItemDef, ConstId, ContainerId, DefWithBodyId, EnumId, EnumVariantId, FunctionId,
-    GenericDefId, ImplId, LocalModuleId, Lookup, ModuleDefId, ModuleId, StaticId, StructId,
-    TraitId, TypeAliasId,
+    GenericDefId, HasModule, ImplId, LocalModuleId, Lookup, ModuleDefId, ModuleId, StaticId,
+    StructId, TraitId, TypeAliasId,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -29,20 +29,20 @@ pub struct Resolver {
 
 // FIXME how to store these best
 #[derive(Debug, Clone)]
-pub(crate) struct ModuleItemMap {
+struct ModuleItemMap {
     crate_def_map: Arc<CrateDefMap>,
     module_id: LocalModuleId,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ExprScope {
+struct ExprScope {
     owner: DefWithBodyId,
     expr_scopes: Arc<ExprScopes>,
     scope_id: ScopeId,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) enum Scope {
+enum Scope {
     /// All the items and imported names of a module
     ModuleScope(ModuleItemMap),
     /// Brings the generic parameters of an item into scope
@@ -503,13 +503,7 @@ impl HasResolver for TraitId {
 impl<T: Into<AdtId>> HasResolver for T {
     fn resolver(self, db: &impl DefDatabase) -> Resolver {
         let def = self.into();
-        let module = match def {
-            AdtId::StructId(it) => it.0.module(db),
-            AdtId::UnionId(it) => it.0.module(db),
-            AdtId::EnumId(it) => it.module(db),
-        };
-
-        module
+        def.module(db)
             .resolver(db)
             .push_generic_params_scope(db, def.into())
             .push_scope(Scope::AdtScope(def))

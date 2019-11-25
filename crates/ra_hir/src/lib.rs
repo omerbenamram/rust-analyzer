@@ -32,7 +32,6 @@ pub mod db;
 pub mod source_binder;
 
 mod ty;
-mod impl_block;
 mod expr;
 pub mod diagnostics;
 mod util;
@@ -49,11 +48,10 @@ mod marks;
 
 pub use crate::{
     code_model::{
-        src::{HasBodySource, HasSource},
-        Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency, DefWithBody, Docs, Enum,
-        EnumVariant, FieldSource, Function, GenericDef, GenericParam, HasAttrs, HasBody, ImplBlock,
-        Import, Local, MacroDef, Module, ModuleDef, ModuleSource, ScopeDef, Static, Struct,
-        StructField, Trait, TypeAlias, Union, VariantDef,
+        src::HasSource, Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency,
+        DefWithBody, Docs, Enum, EnumVariant, FieldSource, Function, GenericDef, GenericParam,
+        HasAttrs, ImplBlock, Import, Local, MacroDef, Module, ModuleDef, ModuleSource, ScopeDef,
+        Static, Struct, StructField, Trait, TypeAlias, Union, VariantDef,
     },
     expr::ExprScopes,
     from_source::FromSource,

@@ -17,12 +17,12 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::{fmt, iter, mem};
 
-use hir_def::{generics::GenericParams, AdtId};
+use hir_def::{generics::GenericParams, AdtId, GenericDefId};
 use ra_db::{impl_intern_key, salsa};
 
 use crate::{
-    db::HirDatabase, expr::ExprId, util::make_mut_slice, Adt, Crate, DefWithBody, FloatTy,
-    GenericDef, IntTy, Mutability, Name, Trait, TypeAlias, Uncertain,
+    db::HirDatabase, expr::ExprId, util::make_mut_slice, Adt, Crate, DefWithBody, FloatTy, IntTy,
+    Mutability, Name, Trait, TypeAlias, Uncertain,
 };
 use display::{HirDisplay, HirFormatter};
 
@@ -30,8 +30,9 @@ pub(crate) use autoderef::autoderef;
 pub(crate) use infer::{infer_query, InferTy, InferenceResult};
 pub use lower::CallableDef;
 pub(crate) use lower::{
-    callable_item_sig, generic_defaults_query, generic_predicates_for_param_query,
-    generic_predicates_query, type_for_def, type_for_field, Namespace, TypableDef,
+    callable_item_sig, field_types_query, generic_defaults_query,
+    generic_predicates_for_param_query, generic_predicates_query, type_for_def, Namespace,
+    TypableDef,
 };
 pub(crate) use traits::{InEnvironment, Obligation, ProjectionPredicate, TraitEnvironment};
 
@@ -170,12 +171,12 @@ impl TypeCtor {
             | TypeCtor::Tuple { .. } => None,
             TypeCtor::Closure { def, .. } => def.krate(db),
             TypeCtor::Adt(adt) => adt.krate(db),
-            TypeCtor::FnDef(callable) => callable.krate(db),
+            TypeCtor::FnDef(callable) => Some(callable.krate(db).into()),
             TypeCtor::AssociatedType(type_alias) => type_alias.krate(db),
         }
     }
 
-    pub fn as_generic_def(self) -> Option<crate::GenericDef> {
+    pub fn as_generic_def(self) -> Option<GenericDefId> {
         match self {
             TypeCtor::Bool
             | TypeCtor::Char
@@ -192,7 +193,7 @@ impl TypeCtor {
             | TypeCtor::Closure { .. } => None,
             TypeCtor::Adt(adt) => Some(adt.into()),
             TypeCtor::FnDef(callable) => Some(callable.into()),
-            TypeCtor::AssociatedType(type_alias) => Some(type_alias.into()),
+            TypeCtor::AssociatedType(type_alias) => Some(type_alias.id.into()),
         }
     }
 }
@@ -355,9 +356,9 @@ impl Substs {
         )
     }
 
-    pub fn build_for_def(db: &impl HirDatabase, def: impl Into<GenericDef>) -> SubstsBuilder {
+    pub fn build_for_def(db: &impl HirDatabase, def: impl Into<GenericDefId>) -> SubstsBuilder {
         let def = def.into();
-        let params = db.generic_params(def.into());
+        let params = db.generic_params(def);
         let param_count = params.count_params_including_parent();
         Substs::builder(param_count)
     }
@@ -855,13 +856,20 @@ impl HirDisplay for ApplicationTy {
             TypeCtor::FnDef(def) => {
                 let sig = f.db.callable_item_signature(def);
                 let name = match def {
-                    CallableDef::Function(ff) => ff.name(f.db),
-                    CallableDef::Struct(s) => s.name(f.db).unwrap_or_else(Name::missing),
-                    CallableDef::EnumVariant(e) => e.name(f.db).unwrap_or_else(Name::missing),
+                    CallableDef::FunctionId(ff) => f.db.function_data(ff).name.clone(),
+                    CallableDef::StructId(s) => {
+                        f.db.struct_data(s).name.clone().unwrap_or_else(Name::missing)
+                    }
+                    CallableDef::EnumVariantId(e) => {
+                        let enum_data = f.db.enum_data(e.parent);
+                        enum_data.variants[e.local_id].name.clone().unwrap_or_else(Name::missing)
+                    }
                 };
                 match def {
-                    CallableDef::Function(_) => write!(f, "fn {}", name)?,
-                    CallableDef::Struct(_) | CallableDef::EnumVariant(_) => write!(f, "{}", name)?,
+                    CallableDef::FunctionId(_) => write!(f, "fn {}", name)?,
+                    CallableDef::StructId(_) | CallableDef::EnumVariantId(_) => {
+                        write!(f, "{}", name)?
+                    }
                 }
                 if self.parameters.len() > 0 {
                     write!(f, "<")?;
