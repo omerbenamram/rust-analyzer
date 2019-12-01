@@ -8,13 +8,17 @@
 use std::sync::Arc;
 
 use hir_def::{
+    body::{
+        scope::{ExprScopes, ScopeId},
+        BodySourceMap,
+    },
     expr::{ExprId, PatId},
     path::known,
     resolver::{self, resolver_for_scope, HasResolver, Resolver, TypeNs, ValueNs},
-    DefWithBodyId,
+    AssocItemId, DefWithBodyId,
 };
 use hir_expand::{
-    name::AsName, AstId, HirFileId, MacroCallId, MacroCallLoc, MacroFileKind, Source,
+    hygiene::Hygiene, name::AsName, AstId, HirFileId, InFile, MacroCallId, MacroFileKind,
 };
 use ra_syntax::{
     ast::{self, AstNode},
@@ -25,16 +29,15 @@ use ra_syntax::{
 
 use crate::{
     db::HirDatabase,
-    expr::{BodySourceMap, ExprScopes, ScopeId},
     ty::{
         method_resolution::{self, implements_trait},
-        TraitEnvironment,
+        InEnvironment, TraitEnvironment, Ty,
     },
     Adt, AssocItem, Const, DefWithBody, Either, Enum, EnumVariant, FromSource, Function,
-    GenericParam, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Ty, TypeAlias,
+    GenericParam, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Type, TypeAlias,
 };
 
-fn try_get_resolver_for_node(db: &impl HirDatabase, node: Source<&SyntaxNode>) -> Option<Resolver> {
+fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -> Option<Resolver> {
     match_ast! {
         match (node.value) {
             ast::Module(it) => {
@@ -68,7 +71,7 @@ fn try_get_resolver_for_node(db: &impl HirDatabase, node: Source<&SyntaxNode>) -
 
 fn def_with_body_from_child_node(
     db: &impl HirDatabase,
-    child: Source<&SyntaxNode>,
+    child: InFile<&SyntaxNode>,
 ) -> Option<DefWithBody> {
     child.value.ancestors().find_map(|node| {
         match_ast! {
@@ -91,7 +94,7 @@ pub struct SourceAnalyzer {
     body_owner: Option<DefWithBody>,
     body_source_map: Option<Arc<BodySourceMap>>,
     infer: Option<Arc<crate::ty::InferenceResult>>,
-    scopes: Option<Arc<crate::expr::ExprScopes>>,
+    scopes: Option<Arc<ExprScopes>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,8 +141,8 @@ impl Expansion {
     pub fn map_token_down(
         &self,
         db: &impl HirDatabase,
-        token: Source<&SyntaxToken>,
-    ) -> Option<Source<SyntaxToken>> {
+        token: InFile<&SyntaxToken>,
+    ) -> Option<InFile<SyntaxToken>> {
         let exp_info = self.file_id().expansion_info(db)?;
         exp_info.map_token_down(token)
     }
@@ -152,7 +155,7 @@ impl Expansion {
 impl SourceAnalyzer {
     pub fn new(
         db: &impl HirDatabase,
-        node: Source<&SyntaxNode>,
+        node: InFile<&SyntaxNode>,
         offset: Option<TextUnit>,
     ) -> SourceAnalyzer {
         let def_with_body = def_with_body_from_child_node(db, node);
@@ -168,7 +171,7 @@ impl SourceAnalyzer {
                 resolver,
                 body_owner: Some(def),
                 body_source_map: Some(source_map),
-                infer: Some(db.infer(def)),
+                infer: Some(db.infer(def.into())),
                 scopes: Some(scopes),
                 file_id: node.file_id,
             }
@@ -189,57 +192,61 @@ impl SourceAnalyzer {
     }
 
     fn expr_id(&self, expr: &ast::Expr) -> Option<ExprId> {
-        let src = Source { file_id: self.file_id, value: expr };
+        let src = InFile { file_id: self.file_id, value: expr };
         self.body_source_map.as_ref()?.node_expr(src)
     }
 
     fn pat_id(&self, pat: &ast::Pat) -> Option<PatId> {
-        let src = Source { file_id: self.file_id, value: pat };
+        let src = InFile { file_id: self.file_id, value: pat };
         self.body_source_map.as_ref()?.node_pat(src)
     }
 
-    pub fn type_of(&self, _db: &impl HirDatabase, expr: &ast::Expr) -> Option<crate::Ty> {
+    pub fn type_of(&self, db: &impl HirDatabase, expr: &ast::Expr) -> Option<Type> {
         let expr_id = self.expr_id(expr)?;
-        Some(self.infer.as_ref()?[expr_id].clone())
+        let ty = self.infer.as_ref()?[expr_id].clone();
+        let environment = TraitEnvironment::lower(db, &self.resolver);
+        Some(Type { krate: self.resolver.krate()?, ty: InEnvironment { value: ty, environment } })
     }
 
-    pub fn type_of_pat(&self, _db: &impl HirDatabase, pat: &ast::Pat) -> Option<crate::Ty> {
+    pub fn type_of_pat(&self, db: &impl HirDatabase, pat: &ast::Pat) -> Option<Type> {
         let pat_id = self.pat_id(pat)?;
-        Some(self.infer.as_ref()?[pat_id].clone())
+        let ty = self.infer.as_ref()?[pat_id].clone();
+        let environment = TraitEnvironment::lower(db, &self.resolver);
+        Some(Type { krate: self.resolver.krate()?, ty: InEnvironment { value: ty, environment } })
     }
 
     pub fn resolve_method_call(&self, call: &ast::MethodCallExpr) -> Option<Function> {
         let expr_id = self.expr_id(&call.clone().into())?;
-        self.infer.as_ref()?.method_resolution(expr_id)
+        self.infer.as_ref()?.method_resolution(expr_id).map(Function::from)
     }
 
     pub fn resolve_field(&self, field: &ast::FieldExpr) -> Option<crate::StructField> {
         let expr_id = self.expr_id(&field.clone().into())?;
-        self.infer.as_ref()?.field_resolution(expr_id)
+        self.infer.as_ref()?.field_resolution(expr_id).map(|it| it.into())
     }
 
     pub fn resolve_record_field(&self, field: &ast::RecordField) -> Option<crate::StructField> {
         let expr_id = self.expr_id(&field.expr()?)?;
-        self.infer.as_ref()?.record_field_resolution(expr_id)
+        self.infer.as_ref()?.record_field_resolution(expr_id).map(|it| it.into())
     }
 
     pub fn resolve_record_literal(&self, record_lit: &ast::RecordLit) -> Option<crate::VariantDef> {
         let expr_id = self.expr_id(&record_lit.clone().into())?;
-        self.infer.as_ref()?.variant_resolution_for_expr(expr_id)
+        self.infer.as_ref()?.variant_resolution_for_expr(expr_id).map(|it| it.into())
     }
 
     pub fn resolve_record_pattern(&self, record_pat: &ast::RecordPat) -> Option<crate::VariantDef> {
         let pat_id = self.pat_id(&record_pat.clone().into())?;
-        self.infer.as_ref()?.variant_resolution_for_pat(pat_id)
+        self.infer.as_ref()?.variant_resolution_for_pat(pat_id).map(|it| it.into())
     }
 
     pub fn resolve_macro_call(
         &self,
         db: &impl HirDatabase,
-        macro_call: &ast::MacroCall,
+        macro_call: InFile<&ast::MacroCall>,
     ) -> Option<MacroDef> {
-        // This must be a normal source file rather than macro file.
-        let path = macro_call.path().and_then(Path::from_ast)?;
+        let hygiene = Hygiene::new(db, macro_call.file_id);
+        let path = macro_call.value.path().and_then(|ast| Path::from_src(ast, &hygiene))?;
         self.resolver.resolve_path_as_macro(db, &path).map(|it| it.into())
     }
 
@@ -293,13 +300,13 @@ impl SourceAnalyzer {
         if let Some(path_expr) = path.syntax().parent().and_then(ast::PathExpr::cast) {
             let expr_id = self.expr_id(&path_expr.into())?;
             if let Some(assoc) = self.infer.as_ref()?.assoc_resolutions_for_expr(expr_id) {
-                return Some(PathResolution::AssocItem(assoc));
+                return Some(PathResolution::AssocItem(assoc.into()));
             }
         }
         if let Some(path_pat) = path.syntax().parent().and_then(ast::PathPat::cast) {
             let pat_id = self.pat_id(&path_pat.into())?;
             if let Some(assoc) = self.infer.as_ref()?.assoc_resolutions_for_pat(pat_id) {
-                return Some(PathResolution::AssocItem(assoc));
+                return Some(PathResolution::AssocItem(assoc.into()));
             }
         }
         // This must be a normal source file rather than macro file.
@@ -311,7 +318,7 @@ impl SourceAnalyzer {
         let name = name_ref.as_name();
         let source_map = self.body_source_map.as_ref()?;
         let scopes = self.scopes.as_ref()?;
-        let scope = scope_for(scopes, source_map, Source::new(self.file_id, name_ref.syntax()))?;
+        let scope = scope_for(scopes, source_map, InFile::new(self.file_id, name_ref.syntax()))?;
         let entry = scopes.resolve_name_in_scope(scope, &name)?;
         Some(ScopeEntryWithSyntax {
             name: entry.name().clone(),
@@ -361,14 +368,14 @@ impl SourceAnalyzer {
     pub fn iterate_method_candidates<T>(
         &self,
         db: &impl HirDatabase,
-        ty: Ty,
+        ty: &Type,
         name: Option<&Name>,
         mut callback: impl FnMut(&Ty, Function) -> Option<T>,
     ) -> Option<T> {
         // There should be no inference vars in types passed here
         // FIXME check that?
         // FIXME replace Unknown by bound vars here
-        let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
+        let canonical = crate::ty::Canonical { value: ty.ty.value.clone(), num_vars: 0 };
         method_resolution::iterate_method_candidates(
             &canonical,
             db,
@@ -376,7 +383,7 @@ impl SourceAnalyzer {
             name,
             method_resolution::LookupMode::MethodCall,
             |ty, it| match it {
-                AssocItem::Function(f) => callback(ty, f),
+                AssocItemId::FunctionId(f) => callback(ty, f.into()),
                 _ => None,
             },
         )
@@ -385,37 +392,37 @@ impl SourceAnalyzer {
     pub fn iterate_path_candidates<T>(
         &self,
         db: &impl HirDatabase,
-        ty: Ty,
+        ty: &Type,
         name: Option<&Name>,
-        callback: impl FnMut(&Ty, AssocItem) -> Option<T>,
+        mut callback: impl FnMut(&Ty, AssocItem) -> Option<T>,
     ) -> Option<T> {
         // There should be no inference vars in types passed here
         // FIXME check that?
         // FIXME replace Unknown by bound vars here
-        let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
+        let canonical = crate::ty::Canonical { value: ty.ty.value.clone(), num_vars: 0 };
         method_resolution::iterate_method_candidates(
             &canonical,
             db,
             &self.resolver,
             name,
             method_resolution::LookupMode::Path,
-            callback,
+            |ty, it| callback(ty, it.into()),
         )
     }
 
-    pub fn autoderef<'a>(
-        &'a self,
-        db: &'a impl HirDatabase,
-        ty: Ty,
-    ) -> impl Iterator<Item = Ty> + 'a {
-        // There should be no inference vars in types passed here
-        // FIXME check that?
-        let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
-        let krate = self.resolver.krate();
-        let environment = TraitEnvironment::lower(db, &self.resolver);
-        let ty = crate::ty::InEnvironment { value: canonical, environment };
-        crate::ty::autoderef(db, krate, ty).map(|canonical| canonical.value)
-    }
+    // pub fn autoderef<'a>(
+    //     &'a self,
+    //     db: &'a impl HirDatabase,
+    //     ty: Ty,
+    // ) -> impl Iterator<Item = Ty> + 'a {
+    //     // There should be no inference vars in types passed here
+    //     // FIXME check that?
+    //     let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
+    //     let krate = self.resolver.krate();
+    //     let environment = TraitEnvironment::lower(db, &self.resolver);
+    //     let ty = crate::ty::InEnvironment { value: canonical, environment };
+    //     crate::ty::autoderef(db, krate, ty).map(|canonical| canonical.value)
+    // }
 
     /// Checks that particular type `ty` implements `std::future::Future`.
     /// This function is used in `.await` syntax completion.
@@ -439,52 +446,36 @@ impl SourceAnalyzer {
     pub fn expand(
         &self,
         db: &impl HirDatabase,
-        macro_call: Source<&ast::MacroCall>,
+        macro_call: InFile<&ast::MacroCall>,
     ) -> Option<Expansion> {
-        let def = self.resolve_macro_call(db, macro_call.value)?.id;
+        let def = self.resolve_macro_call(db, macro_call)?.id;
         let ast_id = AstId::new(
             macro_call.file_id,
             db.ast_id_map(macro_call.file_id).ast_id(macro_call.value),
         );
-        let macro_call_loc = MacroCallLoc { def, ast_id };
         Some(Expansion {
-            macro_call_id: db.intern_macro(macro_call_loc),
+            macro_call_id: def.as_call_id(db, ast_id),
             macro_file_kind: to_macro_file_kind(macro_call.value),
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn body_source_map(&self) -> Arc<BodySourceMap> {
-        self.body_source_map.clone().unwrap()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inference_result(&self) -> Arc<crate::ty::InferenceResult> {
-        self.infer.clone().unwrap()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn analyzed_declaration(&self) -> Option<DefWithBody> {
-        self.body_owner
     }
 }
 
 fn scope_for(
     scopes: &ExprScopes,
     source_map: &BodySourceMap,
-    node: Source<&SyntaxNode>,
+    node: InFile<&SyntaxNode>,
 ) -> Option<ScopeId> {
     node.value
         .ancestors()
         .filter_map(ast::Expr::cast)
-        .filter_map(|it| source_map.node_expr(Source::new(node.file_id, &it)))
+        .filter_map(|it| source_map.node_expr(InFile::new(node.file_id, &it)))
         .find_map(|it| scopes.scope_for(it))
 }
 
 fn scope_for_offset(
     scopes: &ExprScopes,
     source_map: &BodySourceMap,
-    offset: Source<TextUnit>,
+    offset: InFile<TextUnit>,
 ) -> Option<ScopeId> {
     scopes
         .scope_by_expr()

@@ -32,28 +32,20 @@ pub mod db;
 pub mod source_binder;
 
 mod ty;
-mod expr;
 pub mod diagnostics;
-mod util;
 
 mod from_id;
 mod code_model;
 
 pub mod from_source;
 
-#[cfg(test)]
-mod test_db;
-#[cfg(test)]
-mod marks;
-
 pub use crate::{
     code_model::{
         src::HasSource, Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency,
         DefWithBody, Docs, Enum, EnumVariant, FieldSource, Function, GenericDef, GenericParam,
         HasAttrs, ImplBlock, Import, Local, MacroDef, Module, ModuleDef, ModuleSource, ScopeDef,
-        Static, Struct, StructField, Trait, TypeAlias, Union, VariantDef,
+        Static, Struct, StructField, Trait, Type, TypeAlias, Union, VariantDef,
     },
-    expr::ExprScopes,
     from_source::FromSource,
     source_binder::{PathResolution, ScopeEntryWithSyntax, SourceAnalyzer},
     ty::{
@@ -64,11 +56,12 @@ pub use crate::{
 };
 
 pub use hir_def::{
+    body::scope::ExprScopes,
     builtin_type::BuiltinType,
     docs::Documentation,
     path::{Path, PathKind},
     type_ref::Mutability,
 };
 pub use hir_expand::{
-    either::Either, name::Name, HirFileId, MacroCallId, MacroCallLoc, MacroDefId, MacroFile, Source,
+    either::Either, name::Name, HirFileId, InFile, MacroCallId, MacroCallLoc, MacroDefId, MacroFile,
 };

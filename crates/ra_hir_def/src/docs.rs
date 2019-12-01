@@ -8,7 +8,11 @@ use std::sync::Arc;
 use hir_expand::either::Either;
 use ra_syntax::ast;
 
-use crate::{db::DefDatabase, AdtId, AstItemDef, AttrDefId, HasChildSource, HasSource, Lookup};
+use crate::{
+    db::DefDatabase,
+    src::{HasChildSource, HasSource},
+    AdtId, AstItemDef, AttrDefId, Lookup,
+};
 
 /// Holds documentation
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -36,7 +40,7 @@ impl Documentation {
         match def {
             AttrDefId::ModuleId(module) => {
                 let def_map = db.crate_def_map(module.krate);
-                let src = def_map[module.module_id].declaration_source(db)?;
+                let src = def_map[module.local_id].declaration_source(db)?;
                 docs_from_ast(&src.value)
             }
             AttrDefId::StructFieldId(it) => {

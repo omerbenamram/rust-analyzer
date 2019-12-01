@@ -14,7 +14,7 @@ To learn more about how rust-analyzer works, see
 
 We also publish rustdoc docs to pages:
 
-https://rust-analyzer.github.io/rust-analyzer/ra_ide_api/
+https://rust-analyzer.github.io/rust-analyzer/ra_ide/
 
 Various organizational and process issues are discussed in this document.
 
@@ -124,9 +124,8 @@ Logging is done by both rust-analyzer and VS Code, so it might be tricky to
 figure out where logs go.
 
 Inside rust-analyzer, we use the standard `log` crate for logging, and
-`flexi_logger` for logging frotend. By default, log goes to stderr (the same as
-with `env_logger`), but the stderr itself is processed by VS Code. To mirror
-logs to a `./log` directory, set `RA_LOG_DIR=1` environmental variable.
+`env_logger` for logging frontend. By default, log goes to stderr, but the
+stderr itself is processed by VS Code.
 
 To see stderr in the running VS Code instance, go to the "Output" tab of the
 panel and select `rust-analyzer`. This shows `eprintln!` as well. Note that

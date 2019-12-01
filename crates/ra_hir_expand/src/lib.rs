@@ -13,7 +13,7 @@ pub mod diagnostics;
 pub mod builtin_macro;
 pub mod quote;
 
-use std::hash::{Hash, Hasher};
+use std::hash::Hash;
 use std::sync::Arc;
 
 use ra_db::{salsa, CrateId, FileId};
@@ -70,7 +70,7 @@ impl HirFileId {
             HirFileIdRepr::FileId(file_id) => file_id,
             HirFileIdRepr::MacroFile(macro_file) => {
                 let loc = db.lookup_intern_macro(macro_file.macro_call_id);
-                loc.ast_id.file_id().original_file(db)
+                loc.ast_id.file_id.original_file(db)
             }
         }
     }
@@ -90,9 +90,9 @@ impl HirFileId {
                 let macro_arg = db.macro_arg(macro_file.macro_call_id)?;
 
                 Some(ExpansionInfo {
-                    expanded: Source::new(self, parse.syntax_node()),
-                    arg: Source::new(loc.ast_id.file_id, arg_tt),
-                    def: Source::new(loc.ast_id.file_id, def_tt),
+                    expanded: InFile::new(self, parse.syntax_node()),
+                    arg: InFile::new(loc.ast_id.file_id, arg_tt),
+                    def: InFile::new(loc.ast_id.file_id, def_tt),
                     macro_arg,
                     macro_def,
                     exp_map,
@@ -135,6 +135,16 @@ pub struct MacroDefId {
     pub kind: MacroDefKind,
 }
 
+impl MacroDefId {
+    pub fn as_call_id(
+        self,
+        db: &dyn db::AstDatabase,
+        ast_id: AstId<ast::MacroCall>,
+    ) -> MacroCallId {
+        db.intern_macro(MacroCallLoc { def: self, ast_id })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MacroDefKind {
     Declarative,
@@ -143,8 +153,8 @@ pub enum MacroDefKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct MacroCallLoc {
-    pub def: MacroDefId,
-    pub ast_id: AstId<ast::MacroCall>,
+    pub(crate) def: MacroDefId,
+    pub(crate) ast_id: AstId<ast::MacroCall>,
 }
 
 impl MacroCallId {
@@ -157,9 +167,9 @@ impl MacroCallId {
 /// ExpansionInfo mainly describes how to map text range between src and expanded macro
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpansionInfo {
-    expanded: Source<SyntaxNode>,
-    arg: Source<ast::TokenTree>,
-    def: Source<ast::TokenTree>,
+    expanded: InFile<SyntaxNode>,
+    arg: InFile<ast::TokenTree>,
+    def: InFile<ast::TokenTree>,
 
     macro_def: Arc<(db::TokenExpander, mbe::TokenMap)>,
     macro_arg: Arc<(tt::Subtree, mbe::TokenMap)>,
@@ -167,7 +177,7 @@ pub struct ExpansionInfo {
 }
 
 impl ExpansionInfo {
-    pub fn map_token_down(&self, token: Source<&SyntaxToken>) -> Option<Source<SyntaxToken>> {
+    pub fn map_token_down(&self, token: InFile<&SyntaxToken>) -> Option<InFile<SyntaxToken>> {
         assert_eq!(token.file_id, self.arg.file_id);
         let range =
             token.value.text_range().checked_sub(self.arg.value.syntax().text_range().start())?;
@@ -181,7 +191,7 @@ impl ExpansionInfo {
         Some(self.expanded.with_value(token))
     }
 
-    pub fn map_token_up(&self, token: Source<&SyntaxToken>) -> Option<Source<SyntaxToken>> {
+    pub fn map_token_up(&self, token: InFile<&SyntaxToken>) -> Option<InFile<SyntaxToken>> {
         let token_id = self.exp_map.token_by_range(token.value.text_range())?;
 
         let (token_id, origin) = self.macro_def.0.map_id_up(token_id);
@@ -204,73 +214,42 @@ impl ExpansionInfo {
 ///
 /// It is stable across reparses, and can be used as salsa key/value.
 // FIXME: isn't this just a `Source<FileAstId<N>>` ?
-#[derive(Debug)]
-pub struct AstId<N: AstNode> {
-    file_id: HirFileId,
-    file_ast_id: FileAstId<N>,
-}
-
-impl<N: AstNode> Clone for AstId<N> {
-    fn clone(&self) -> AstId<N> {
-        *self
-    }
-}
-impl<N: AstNode> Copy for AstId<N> {}
-
-impl<N: AstNode> PartialEq for AstId<N> {
-    fn eq(&self, other: &Self) -> bool {
-        (self.file_id, self.file_ast_id) == (other.file_id, other.file_ast_id)
-    }
-}
-impl<N: AstNode> Eq for AstId<N> {}
-impl<N: AstNode> Hash for AstId<N> {
-    fn hash<H: Hasher>(&self, hasher: &mut H) {
-        (self.file_id, self.file_ast_id).hash(hasher);
-    }
-}
+pub type AstId<N> = InFile<FileAstId<N>>;
 
 impl<N: AstNode> AstId<N> {
-    pub fn new(file_id: HirFileId, file_ast_id: FileAstId<N>) -> AstId<N> {
-        AstId { file_id, file_ast_id }
-    }
-
-    pub fn file_id(&self) -> HirFileId {
-        self.file_id
-    }
-
     pub fn to_node(&self, db: &dyn db::AstDatabase) -> N {
         let root = db.parse_or_expand(self.file_id).unwrap();
-        db.ast_id_map(self.file_id).get(self.file_ast_id).to_node(&root)
+        db.ast_id_map(self.file_id).get(self.value).to_node(&root)
     }
 }
 
-/// `Source<T>` stores a value of `T` inside a particular file/syntax tree.
+/// `InFile<T>` stores a value of `T` inside a particular file/syntax tree.
 ///
 /// Typical usages are:
 ///
-/// * `Source<SyntaxNode>` -- syntax node in a file
-/// * `Source<ast::FnDef>` -- ast node in a file
-/// * `Source<TextUnit>` -- offset in a file
+/// * `InFile<SyntaxNode>` -- syntax node in a file
+/// * `InFile<ast::FnDef>` -- ast node in a file
+/// * `InFile<TextUnit>` -- offset in a file
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
-pub struct Source<T> {
+pub struct InFile<T> {
     pub file_id: HirFileId,
     pub value: T,
 }
 
-impl<T> Source<T> {
-    pub fn new(file_id: HirFileId, value: T) -> Source<T> {
-        Source { file_id, value }
+impl<T> InFile<T> {
+    pub fn new(file_id: HirFileId, value: T) -> InFile<T> {
+        InFile { file_id, value }
     }
 
     // Similarly, naming here is stupid...
-    pub fn with_value<U>(&self, value: U) -> Source<U> {
-        Source::new(self.file_id, value)
+    pub fn with_value<U>(&self, value: U) -> InFile<U> {
+        InFile::new(self.file_id, value)
     }
 
-    pub fn map<F: FnOnce(T) -> U, U>(self, f: F) -> Source<U> {
-        Source::new(self.file_id, f(self.value))
+    pub fn map<F: FnOnce(T) -> U, U>(self, f: F) -> InFile<U> {
+        InFile::new(self.file_id, f(self.value))
     }
-    pub fn as_ref(&self) -> Source<&T> {
+    pub fn as_ref(&self) -> InFile<&T> {
         self.with_value(&self.value)
     }
     pub fn file_syntax(&self, db: &impl db::AstDatabase) -> SyntaxNode {

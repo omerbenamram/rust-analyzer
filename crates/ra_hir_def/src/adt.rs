@@ -5,32 +5,32 @@ use std::sync::Arc;
 use hir_expand::{
     either::Either,
     name::{AsName, Name},
-    Source,
+    InFile,
 };
 use ra_arena::{map::ArenaMap, Arena};
 use ra_syntax::ast::{self, NameOwner, TypeAscriptionOwner};
 
 use crate::{
-    db::DefDatabase, trace::Trace, type_ref::TypeRef, AstItemDef, EnumId, HasChildSource,
+    db::DefDatabase, src::HasChildSource, trace::Trace, type_ref::TypeRef, AstItemDef, EnumId,
     LocalEnumVariantId, LocalStructFieldId, StructId, UnionId, VariantId,
 };
 
 /// Note that we use `StructData` for unions as well!
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructData {
-    pub name: Option<Name>,
+    pub name: Name,
     pub variant_data: Arc<VariantData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumData {
-    pub name: Option<Name>,
+    pub name: Name,
     pub variants: Arena<LocalEnumVariantId, EnumVariantData>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumVariantData {
-    pub name: Option<Name>,
+    pub name: Name,
     pub variant_data: Arc<VariantData>,
 }
 
@@ -51,14 +51,14 @@ pub struct StructFieldData {
 impl StructData {
     pub(crate) fn struct_data_query(db: &impl DefDatabase, id: StructId) -> Arc<StructData> {
         let src = id.source(db);
-        let name = src.value.name().map(|n| n.as_name());
+        let name = src.value.name().map_or_else(Name::missing, |n| n.as_name());
         let variant_data = VariantData::new(src.value.kind());
         let variant_data = Arc::new(variant_data);
         Arc::new(StructData { name, variant_data })
     }
     pub(crate) fn union_data_query(db: &impl DefDatabase, id: UnionId) -> Arc<StructData> {
         let src = id.source(db);
-        let name = src.value.name().map(|n| n.as_name());
+        let name = src.value.name().map_or_else(Name::missing, |n| n.as_name());
         let variant_data = VariantData::new(
             src.value
                 .record_field_def_list()
@@ -73,14 +73,14 @@ impl StructData {
 impl EnumData {
     pub(crate) fn enum_data_query(db: &impl DefDatabase, e: EnumId) -> Arc<EnumData> {
         let src = e.source(db);
-        let name = src.value.name().map(|n| n.as_name());
+        let name = src.value.name().map_or_else(Name::missing, |n| n.as_name());
         let mut trace = Trace::new_for_arena();
         lower_enum(&mut trace, &src.value);
         Arc::new(EnumData { name, variants: trace.into_arena() })
     }
 
-    pub(crate) fn variant(&self, name: &Name) -> Option<LocalEnumVariantId> {
-        let (id, _) = self.variants.iter().find(|(_id, data)| data.name.as_ref() == Some(name))?;
+    pub fn variant(&self, name: &Name) -> Option<LocalEnumVariantId> {
+        let (id, _) = self.variants.iter().find(|(_id, data)| &data.name == name)?;
         Some(id)
     }
 }
@@ -88,7 +88,7 @@ impl EnumData {
 impl HasChildSource for EnumId {
     type ChildId = LocalEnumVariantId;
     type Value = ast::EnumVariant;
-    fn child_source(&self, db: &impl DefDatabase) -> Source<ArenaMap<Self::ChildId, Self::Value>> {
+    fn child_source(&self, db: &impl DefDatabase) -> InFile<ArenaMap<Self::ChildId, Self::Value>> {
         let src = self.source(db);
         let mut trace = Trace::new_for_map();
         lower_enum(&mut trace, &src.value);
@@ -104,7 +104,7 @@ fn lower_enum(
         trace.alloc(
             || var.clone(),
             || EnumVariantData {
-                name: var.name().map(|it| it.as_name()),
+                name: var.name().map_or_else(Name::missing, |it| it.as_name()),
                 variant_data: Arc::new(VariantData::new(var.kind())),
             },
         );
@@ -129,6 +129,10 @@ impl VariantData {
         }
     }
 
+    pub fn field(&self, name: &Name) -> Option<LocalStructFieldId> {
+        self.fields().iter().find_map(|(id, data)| if &data.name == name { Some(id) } else { None })
+    }
+
     pub fn is_unit(&self) -> bool {
         match self {
             VariantData::Unit => true,
@@ -141,7 +145,7 @@ impl HasChildSource for VariantId {
     type ChildId = LocalStructFieldId;
     type Value = Either<ast::TupleFieldDef, ast::RecordFieldDef>;
 
-    fn child_source(&self, db: &impl DefDatabase) -> Source<ArenaMap<Self::ChildId, Self::Value>> {
+    fn child_source(&self, db: &impl DefDatabase) -> InFile<ArenaMap<Self::ChildId, Self::Value>> {
         let src = match self {
             VariantId::EnumVariantId(it) => {
                 // I don't really like the fact that we call into parent source

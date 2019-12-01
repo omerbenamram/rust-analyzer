@@ -13,7 +13,7 @@ use ra_syntax::{
     AstNode,
 };
 
-use crate::{type_ref::TypeRef, Source};
+use crate::{type_ref::TypeRef, InFile};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Path {
@@ -67,7 +67,7 @@ pub enum PathKind {
 impl Path {
     /// Calls `cb` with all paths, represented by this use item.
     pub(crate) fn expand_use_item(
-        item_src: Source<ast::UseItem>,
+        item_src: InFile<ast::UseItem>,
         hygiene: &Hygiene,
         mut cb: impl FnMut(Path, &ast::UseTree, bool, Option<Name>),
     ) {
@@ -97,7 +97,7 @@ impl Path {
 
     /// Converts an `ast::Path` to `Path`. Works with use trees.
     /// It correctly handles `$crate` based path from macro call.
-    pub(crate) fn from_src(mut path: ast::Path, hygiene: &Hygiene) -> Option<Path> {
+    pub fn from_src(mut path: ast::Path, hygiene: &Hygiene) -> Option<Path> {
         let mut kind = PathKind::Plain;
         let mut segments = Vec::new();
         loop {
@@ -407,6 +407,36 @@ pub mod known {
 
     pub fn std_ops_try() -> Path {
         Path::from_simple_segments(PathKind::Abs, vec![name::STD, name::OPS, name::TRY_TYPE])
+    }
+
+    pub fn std_ops_range() -> Path {
+        Path::from_simple_segments(PathKind::Abs, vec![name::STD, name::OPS, name::RANGE_TYPE])
+    }
+
+    pub fn std_ops_range_from() -> Path {
+        Path::from_simple_segments(PathKind::Abs, vec![name::STD, name::OPS, name::RANGE_FROM_TYPE])
+    }
+
+    pub fn std_ops_range_full() -> Path {
+        Path::from_simple_segments(PathKind::Abs, vec![name::STD, name::OPS, name::RANGE_FULL_TYPE])
+    }
+
+    pub fn std_ops_range_inclusive() -> Path {
+        Path::from_simple_segments(
+            PathKind::Abs,
+            vec![name::STD, name::OPS, name::RANGE_INCLUSIVE_TYPE],
+        )
+    }
+
+    pub fn std_ops_range_to() -> Path {
+        Path::from_simple_segments(PathKind::Abs, vec![name::STD, name::OPS, name::RANGE_TO_TYPE])
+    }
+
+    pub fn std_ops_range_to_inclusive() -> Path {
+        Path::from_simple_segments(
+            PathKind::Abs,
+            vec![name::STD, name::OPS, name::RANGE_TO_INCLUSIVE_TYPE],
+        )
     }
 
     pub fn std_result_result() -> Path {

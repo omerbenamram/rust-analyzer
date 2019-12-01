@@ -6,8 +6,7 @@ pub mod scope;
 use std::{ops::Index, sync::Arc};
 
 use hir_expand::{
-    either::Either, hygiene::Hygiene, AstId, HirFileId, MacroCallLoc, MacroDefId, MacroFileKind,
-    Source,
+    either::Either, hygiene::Hygiene, AstId, HirFileId, InFile, MacroDefId, MacroFileKind,
 };
 use ra_arena::{map::ArenaMap, Arena};
 use ra_syntax::{ast, AstNode, AstPtr};
@@ -18,7 +17,8 @@ use crate::{
     expr::{Expr, ExprId, Pat, PatId},
     nameres::CrateDefMap,
     path::Path,
-    DefWithBodyId, HasModule, HasSource, Lookup, ModuleId,
+    src::HasSource,
+    DefWithBodyId, HasModule, Lookup, ModuleId,
 };
 
 struct Expander {
@@ -47,7 +47,7 @@ impl Expander {
 
         if let Some(path) = macro_call.path().and_then(|path| self.parse_path(path)) {
             if let Some(def) = self.resolve_path_as_macro(db, &path) {
-                let call_id = db.intern_macro(MacroCallLoc { def, ast_id });
+                let call_id = def.as_call_id(db, ast_id);
                 let file_id = call_id.as_file(MacroFileKind::Expr);
                 if let Some(node) = db.parse_or_expand(file_id) {
                     if let Some(expr) = ast::Expr::cast(node) {
@@ -74,8 +74,8 @@ impl Expander {
         std::mem::forget(mark);
     }
 
-    fn to_source<T>(&self, value: T) -> Source<T> {
-        Source { file_id: self.current_file_id, value }
+    fn to_source<T>(&self, value: T) -> InFile<T> {
+        InFile { file_id: self.current_file_id, value }
     }
 
     fn parse_path(&mut self, path: ast::Path) -> Option<Path> {
@@ -83,7 +83,7 @@ impl Expander {
     }
 
     fn resolve_path_as_macro(&self, db: &impl DefDatabase, path: &Path) -> Option<MacroDefId> {
-        self.crate_def_map.resolve_path(db, self.module.module_id, path).0.take_macros()
+        self.crate_def_map.resolve_path(db, self.module.local_id, path).0.take_macros()
     }
 }
 
@@ -116,10 +116,10 @@ pub struct Body {
 }
 
 pub type ExprPtr = Either<AstPtr<ast::Expr>, AstPtr<ast::RecordField>>;
-pub type ExprSource = Source<ExprPtr>;
+pub type ExprSource = InFile<ExprPtr>;
 
 pub type PatPtr = Either<AstPtr<ast::Pat>, AstPtr<ast::SelfParam>>;
-pub type PatSource = Source<PatPtr>;
+pub type PatSource = InFile<PatPtr>;
 
 /// An item body together with the mapping from syntax nodes to HIR expression
 /// IDs. This is needed to go from e.g. a position in a file to the HIR
@@ -206,7 +206,7 @@ impl BodySourceMap {
         self.expr_map_back.get(expr).copied()
     }
 
-    pub fn node_expr(&self, node: Source<&ast::Expr>) -> Option<ExprId> {
+    pub fn node_expr(&self, node: InFile<&ast::Expr>) -> Option<ExprId> {
         let src = node.map(|it| Either::A(AstPtr::new(it)));
         self.expr_map.get(&src).cloned()
     }
@@ -215,7 +215,7 @@ impl BodySourceMap {
         self.pat_map_back.get(pat).copied()
     }
 
-    pub fn node_pat(&self, node: Source<&ast::Pat>) -> Option<PatId> {
+    pub fn node_pat(&self, node: InFile<&ast::Pat>) -> Option<PatId> {
         let src = node.map(|it| Either::A(AstPtr::new(it)));
         self.pat_map.get(&src).cloned()
     }

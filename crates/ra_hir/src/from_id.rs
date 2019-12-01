@@ -4,13 +4,13 @@
 //! are splitting the hir.
 
 use hir_def::{
-    AdtId, AssocItemId, AttrDefId, ConstId, DefWithBodyId, EnumId, EnumVariantId, FunctionId,
-    GenericDefId, ModuleDefId, StaticId, StructFieldId, StructId, TypeAliasId, UnionId, VariantId,
+    AdtId, AssocItemId, AttrDefId, DefWithBodyId, EnumVariantId, GenericDefId, ModuleDefId,
+    StructFieldId, VariantId,
 };
 
 use crate::{
-    ty::TypableDef, Adt, AssocItem, AttrDef, Const, Crate, DefWithBody, EnumVariant, Function,
-    GenericDef, ModuleDef, Static, StructField, TypeAlias, VariantDef,
+    Adt, AssocItem, AttrDef, Crate, DefWithBody, EnumVariant, GenericDef, ModuleDef, StructField,
+    VariantDef,
 };
 
 impl From<ra_db::CrateId> for Crate {
@@ -137,58 +137,6 @@ impl From<GenericDef> for GenericDefId {
     }
 }
 
-impl From<AdtId> for TypableDef {
-    fn from(id: AdtId) -> Self {
-        Adt::from(id).into()
-    }
-}
-
-impl From<StructId> for TypableDef {
-    fn from(id: StructId) -> Self {
-        AdtId::StructId(id).into()
-    }
-}
-
-impl From<UnionId> for TypableDef {
-    fn from(id: UnionId) -> Self {
-        AdtId::UnionId(id).into()
-    }
-}
-
-impl From<EnumId> for TypableDef {
-    fn from(id: EnumId) -> Self {
-        AdtId::EnumId(id).into()
-    }
-}
-
-impl From<EnumVariantId> for TypableDef {
-    fn from(id: EnumVariantId) -> Self {
-        EnumVariant::from(id).into()
-    }
-}
-
-impl From<TypeAliasId> for TypableDef {
-    fn from(id: TypeAliasId) -> Self {
-        TypeAlias::from(id).into()
-    }
-}
-
-impl From<FunctionId> for TypableDef {
-    fn from(id: FunctionId) -> Self {
-        Function::from(id).into()
-    }
-}
-impl From<ConstId> for TypableDef {
-    fn from(id: ConstId) -> Self {
-        Const::from(id).into()
-    }
-}
-impl From<StaticId> for TypableDef {
-    fn from(id: StaticId) -> Self {
-        Static::from(id).into()
-    }
-}
-
 impl From<Adt> for GenericDefId {
     fn from(id: Adt) -> Self {
         match id {
@@ -199,11 +147,22 @@ impl From<Adt> for GenericDefId {
     }
 }
 
+impl From<VariantId> for VariantDef {
+    fn from(def: VariantId) -> Self {
+        match def {
+            VariantId::StructId(it) => VariantDef::Struct(it.into()),
+            VariantId::EnumVariantId(it) => VariantDef::EnumVariant(it.into()),
+            VariantId::UnionId(it) => VariantDef::Union(it.into()),
+        }
+    }
+}
+
 impl From<VariantDef> for VariantId {
     fn from(def: VariantDef) -> Self {
         match def {
             VariantDef::Struct(it) => VariantId::StructId(it.id),
             VariantDef::EnumVariant(it) => VariantId::EnumVariantId(it.into()),
+            VariantDef::Union(it) => VariantId::UnionId(it.id),
         }
     }
 }
@@ -211,6 +170,12 @@ impl From<VariantDef> for VariantId {
 impl From<StructField> for StructFieldId {
     fn from(def: StructField) -> Self {
         StructFieldId { parent: def.parent.into(), local_id: def.id }
+    }
+}
+
+impl From<StructFieldId> for StructField {
+    fn from(def: StructFieldId) -> Self {
+        StructField { parent: def.parent.into(), id: def.local_id }
     }
 }
 
