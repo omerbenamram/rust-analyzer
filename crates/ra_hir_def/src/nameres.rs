@@ -57,9 +57,9 @@ mod tests;
 
 use std::sync::Arc;
 
+use either::Either;
 use hir_expand::{
-    ast_id_map::FileAstId, diagnostics::DiagnosticSink, either::Either, name::Name, InFile,
-    MacroDefId,
+    ast_id_map::FileAstId, diagnostics::DiagnosticSink, name::Name, InFile, MacroDefId,
 };
 use once_cell::sync::Lazy;
 use ra_arena::Arena;
@@ -149,6 +149,15 @@ static BUILTIN_SCOPE: Lazy<FxHashMap<Name, Resolution>> = Lazy::new(|| {
         .collect()
 });
 
+/// Shadow mode for builtin type which can be shadowed by module.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum BuiltinShadowMode {
+    // Prefer Module
+    Module,
+    // Prefer Other Types
+    Other,
+}
+
 /// Legacy macros can only be accessed through special methods like `get_legacy_macros`.
 /// Other methods will only resolve values, types and module scoped macros only.
 impl ModuleScope {
@@ -178,8 +187,20 @@ impl ModuleScope {
     }
 
     /// Get a name from current module scope, legacy macros are not included
-    pub fn get(&self, name: &Name) -> Option<&Resolution> {
-        self.items.get(name).or_else(|| BUILTIN_SCOPE.get(name))
+    pub fn get(&self, name: &Name, shadow: BuiltinShadowMode) -> Option<&Resolution> {
+        match shadow {
+            BuiltinShadowMode::Module => self.items.get(name).or_else(|| BUILTIN_SCOPE.get(name)),
+            BuiltinShadowMode::Other => {
+                let item = self.items.get(name);
+                if let Some(res) = item {
+                    if let Some(ModuleDefId::ModuleId(_)) = res.def.take_types() {
+                        return BUILTIN_SCOPE.get(name).or(item);
+                    }
+                }
+
+                item.or_else(|| BUILTIN_SCOPE.get(name))
+            }
+        }
     }
 
     pub fn traits<'a>(&'a self) -> impl Iterator<Item = TraitId> + 'a {
@@ -250,8 +271,10 @@ impl CrateDefMap {
         db: &impl DefDatabase,
         original_module: LocalModuleId,
         path: &Path,
+        shadow: BuiltinShadowMode,
     ) -> (PerNs, Option<usize>) {
-        let res = self.resolve_path_fp_with_macro(db, ResolveMode::Other, original_module, path);
+        let res =
+            self.resolve_path_fp_with_macro(db, ResolveMode::Other, original_module, path, shadow);
         (res.resolved_def, res.segment_index)
     }
 }
@@ -264,10 +287,10 @@ impl ModuleData {
     ) -> InFile<Either<ast::SourceFile, ast::Module>> {
         if let Some(file_id) = self.definition {
             let sf = db.parse(file_id).tree();
-            return InFile::new(file_id.into(), Either::A(sf));
+            return InFile::new(file_id.into(), Either::Left(sf));
         }
         let decl = self.declaration.unwrap();
-        InFile::new(decl.file_id, Either::B(decl.to_node(db)))
+        InFile::new(decl.file_id, Either::Right(decl.to_node(db)))
     }
 
     /// Returns a node which declares this module, either a `mod foo;` or a `mod foo {}`.
