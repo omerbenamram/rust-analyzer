@@ -2,6 +2,7 @@
 
 use either::Either;
 use hir_def::{
+    nameres::ModuleSource,
     src::{HasChildSource, HasSource as _},
     AstItemDef, Lookup, VariantId,
 };
@@ -9,7 +10,7 @@ use ra_syntax::ast;
 
 use crate::{
     db::DefDatabase, Const, Enum, EnumVariant, FieldSource, Function, ImplBlock, Import, MacroDef,
-    Module, ModuleSource, Static, Struct, StructField, Trait, TypeAlias, Union,
+    Module, Static, Struct, StructField, Trait, TypeAlias, TypeParam, Union,
 };
 
 pub use hir_expand::InFile;
@@ -25,11 +26,7 @@ impl Module {
     /// Returns a node which defines this module. That is, a file or a `mod foo {}` with items.
     pub fn definition_source(self, db: &impl DefDatabase) -> InFile<ModuleSource> {
         let def_map = db.crate_def_map(self.id.krate);
-        let src = def_map[self.id.local_id].definition_source(db);
-        src.map(|it| match it {
-            Either::Left(it) => ModuleSource::SourceFile(it),
-            Either::Right(it) => ModuleSource::Module(it),
-        })
+        def_map[self.id.local_id].definition_source(db)
     }
 
     /// Returns a node which declares this module, either a `mod foo;` or a `mod foo {}`.
@@ -108,7 +105,10 @@ impl HasSource for TypeAlias {
 impl HasSource for MacroDef {
     type Ast = ast::MacroCall;
     fn source(self, db: &impl DefDatabase) -> InFile<ast::MacroCall> {
-        InFile { file_id: self.id.ast_id.file_id, value: self.id.ast_id.to_node(db) }
+        InFile {
+            file_id: self.id.ast_id.expect("MacroDef without ast_id").file_id,
+            value: self.id.ast_id.expect("MacroDef without ast_id").to_node(db),
+        }
     }
 }
 impl HasSource for ImplBlock {
@@ -127,5 +127,13 @@ impl HasSource for Import {
         let root = db.parse_or_expand(src.file_id).unwrap();
         let ptr = source_map.get(self.id);
         src.with_value(ptr.map_left(|it| it.to_node(&root)).map_right(|it| it.to_node(&root)))
+    }
+}
+
+impl HasSource for TypeParam {
+    type Ast = Either<ast::TraitDef, ast::TypeParam>;
+    fn source(self, db: &impl DefDatabase) -> InFile<Self::Ast> {
+        let child_source = self.id.parent.child_source(db);
+        child_source.map(|it| it[self.id.local_id].clone())
     }
 }

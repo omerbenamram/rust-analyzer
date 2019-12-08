@@ -16,6 +16,9 @@ pub mod builtin_type;
 pub mod diagnostics;
 pub mod per_ns;
 
+pub mod dyn_map;
+pub mod keys;
+
 pub mod adt;
 pub mod data;
 pub mod generics;
@@ -30,6 +33,7 @@ mod trace;
 pub mod nameres;
 
 pub mod src;
+pub mod child_by_source;
 
 #[cfg(test)]
 mod test_db;
@@ -314,6 +318,16 @@ macro_rules! impl_froms {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeParamId {
+    pub parent: GenericDefId,
+    pub local_id: LocalTypeParamId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LocalTypeParamId(RawId);
+impl_arena_id!(LocalTypeParamId);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerId {
     ModuleId(ModuleId),
     ImplId(ImplId),
@@ -507,6 +521,20 @@ impl HasModule for DefWithBodyId {
             DefWithBodyId::FunctionId(it) => it.lookup(db).module(db),
             DefWithBodyId::StaticId(it) => it.lookup(db).module(db),
             DefWithBodyId::ConstId(it) => it.lookup(db).module(db),
+        }
+    }
+}
+
+impl HasModule for GenericDefId {
+    fn module(&self, db: &impl db::DefDatabase) -> ModuleId {
+        match self {
+            GenericDefId::FunctionId(it) => it.lookup(db).module(db),
+            GenericDefId::AdtId(it) => it.module(db),
+            GenericDefId::TraitId(it) => it.module(db),
+            GenericDefId::TypeAliasId(it) => it.lookup(db).module(db),
+            GenericDefId::ImplId(it) => it.module(db),
+            GenericDefId::EnumVariantId(it) => it.parent.module(db),
+            GenericDefId::ConstId(it) => it.lookup(db).module(db),
         }
     }
 }

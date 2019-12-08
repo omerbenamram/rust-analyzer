@@ -14,12 +14,14 @@ use hir_def::{
         BodySourceMap,
     },
     expr::{ExprId, PatId},
+    nameres::ModuleSource,
     path::known,
     resolver::{self, resolver_for_scope, HasResolver, Resolver, TypeNs, ValueNs},
     AssocItemId, DefWithBodyId,
 };
 use hir_expand::{
-    hygiene::Hygiene, name::AsName, AstId, HirFileId, InFile, MacroCallId, MacroFileKind,
+    hygiene::Hygiene, name::AsName, AstId, HirFileId, InFile, MacroCallId, MacroCallKind,
+    MacroFileKind,
 };
 use ra_syntax::{
     ast::{self, AstNode},
@@ -34,8 +36,8 @@ use crate::{
         method_resolution::{self, implements_trait},
         InEnvironment, TraitEnvironment, Ty,
     },
-    Adt, AssocItem, Const, DefWithBody, Enum, EnumVariant, FromSource, Function, GenericParam,
-    Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Type, TypeAlias,
+    Adt, AssocItem, Const, DefWithBody, Enum, EnumVariant, FromSource, Function, ImplBlock, Local,
+    MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Type, TypeAlias, TypeParam,
 };
 
 fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -> Option<Resolver> {
@@ -46,7 +48,7 @@ fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -
                 Some(crate::Module::from_declaration(db, src)?.id.resolver(db))
             },
              ast::SourceFile(it) => {
-                let src = node.with_value(crate::ModuleSource::SourceFile(it));
+                let src = node.with_value(ModuleSource::SourceFile(it));
                 Some(crate::Module::from_definition(db, src)?.id.resolver(db))
             },
             ast::StructDef(it) => {
@@ -56,6 +58,10 @@ fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -
             ast::EnumDef(it) => {
                 let src = node.with_value(it);
                 Some(Enum::from_source(db, src)?.id.resolver(db))
+            },
+            ast::ImplBlock(it) => {
+                let src = node.with_value(it);
+                Some(ImplBlock::from_source(db, src)?.id.resolver(db))
             },
             _ => match node.value.kind() {
                 FN_DEF | CONST_DEF | STATIC_DEF => {
@@ -74,12 +80,13 @@ fn def_with_body_from_child_node(
     db: &impl HirDatabase,
     child: InFile<&SyntaxNode>,
 ) -> Option<DefWithBody> {
-    child.value.ancestors().find_map(|node| {
+    child.cloned().ancestors_with_macros(db).find_map(|node| {
+        let n = &node.value;
         match_ast! {
-            match node {
-                ast::FnDef(def)  => { return Function::from_source(db, child.with_value(def)).map(DefWithBody::from); },
-                ast::ConstDef(def) => { return Const::from_source(db, child.with_value(def)).map(DefWithBody::from); },
-                ast::StaticDef(def) => { return Static::from_source(db, child.with_value(def)).map(DefWithBody::from); },
+            match n {
+                ast::FnDef(def)  => { return Function::from_source(db, node.with_value(def)).map(DefWithBody::from); },
+                ast::ConstDef(def) => { return Const::from_source(db, node.with_value(def)).map(DefWithBody::from); },
+                ast::StaticDef(def) => { return Static::from_source(db, node.with_value(def)).map(DefWithBody::from); },
                 _ => { None },
             }
         }
@@ -105,7 +112,7 @@ pub enum PathResolution {
     /// A local binding (only value namespace)
     Local(Local),
     /// A generic parameter
-    GenericParam(GenericParam),
+    TypeParam(TypeParam),
     SelfType(crate::ImplBlock),
     Macro(MacroDef),
     AssocItem(crate::AssocItem),
@@ -133,6 +140,7 @@ pub struct ReferenceDescriptor {
     pub name: String,
 }
 
+#[derive(Debug)]
 pub struct Expansion {
     macro_file_kind: MacroFileKind,
     macro_call_id: MacroCallId,
@@ -258,10 +266,7 @@ impl SourceAnalyzer {
     ) -> Option<PathResolution> {
         let types = self.resolver.resolve_path_in_type_ns_fully(db, &path).map(|ty| match ty {
             TypeNs::SelfType(it) => PathResolution::SelfType(it.into()),
-            TypeNs::GenericParam(idx) => PathResolution::GenericParam(GenericParam {
-                parent: self.resolver.generic_def().unwrap(),
-                idx,
-            }),
+            TypeNs::GenericParam(id) => PathResolution::TypeParam(TypeParam { id }),
             TypeNs::AdtSelfType(it) | TypeNs::AdtId(it) => {
                 PathResolution::Def(Adt::from(it).into())
             }
@@ -333,10 +338,7 @@ impl SourceAnalyzer {
                 resolver::ScopeDef::PerNs(it) => it.into(),
                 resolver::ScopeDef::ImplSelfType(it) => ScopeDef::ImplSelfType(it.into()),
                 resolver::ScopeDef::AdtSelfType(it) => ScopeDef::AdtSelfType(it.into()),
-                resolver::ScopeDef::GenericParam(idx) => {
-                    let parent = self.resolver.generic_def().unwrap();
-                    ScopeDef::GenericParam(GenericParam { parent, idx })
-                }
+                resolver::ScopeDef::GenericParam(id) => ScopeDef::GenericParam(TypeParam { id }),
                 resolver::ScopeDef::Local(pat_id) => {
                     let parent = self.resolver.body_owner().unwrap().into();
                     ScopeDef::Local(Local { parent, pat_id })
@@ -455,7 +457,7 @@ impl SourceAnalyzer {
             db.ast_id_map(macro_call.file_id).ast_id(macro_call.value),
         );
         Some(Expansion {
-            macro_call_id: def.as_call_id(db, ast_id),
+            macro_call_id: def.as_call_id(db, MacroCallKind::FnLike(ast_id)),
             macro_file_kind: to_macro_file_kind(macro_call.value),
         })
     }

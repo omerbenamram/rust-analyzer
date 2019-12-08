@@ -19,11 +19,12 @@ use crate::{
     per_ns::PerNs,
     AdtId, AstItemDef, ConstId, ContainerId, DefWithBodyId, EnumId, EnumVariantId, FunctionId,
     GenericDefId, HasModule, ImplId, LocalModuleId, Lookup, ModuleDefId, ModuleId, StaticId,
-    StructId, TraitId, TypeAliasId,
+    StructId, TraitId, TypeAliasId, TypeParamId,
 };
 
 #[derive(Debug, Clone, Default)]
 pub struct Resolver {
+    // FIXME: all usages generally call `.rev`, so maybe reverse once in consturciton?
     scopes: Vec<Scope>,
 }
 
@@ -58,7 +59,7 @@ enum Scope {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeNs {
     SelfType(ImplId),
-    GenericParam(u32),
+    GenericParam(TypeParamId),
     AdtId(AdtId),
     AdtSelfType(AdtId),
     // Yup, enum variants are added to the types ns, but any usage of variant as
@@ -152,10 +153,13 @@ impl Resolver {
                 Scope::ExprScope(_) => continue,
                 Scope::GenericParams { .. } | Scope::ImplBlockScope(_) if skip_to_mod => continue,
 
-                Scope::GenericParams { params, .. } => {
-                    if let Some(param) = params.find_by_name(first_name) {
+                Scope::GenericParams { params, def } => {
+                    if let Some(local_id) = params.find_by_name(first_name) {
                         let idx = if path.segments.len() == 1 { None } else { Some(1) };
-                        return Some((TypeNs::GenericParam(param.idx), idx));
+                        return Some((
+                            TypeNs::GenericParam(TypeParamId { local_id, parent: *def }),
+                            idx,
+                        ));
                     }
                 }
                 Scope::ImplBlockScope(impl_) => {
@@ -246,9 +250,9 @@ impl Resolver {
                 }
                 Scope::ExprScope(_) => continue,
 
-                Scope::GenericParams { params, .. } if n_segments > 1 => {
-                    if let Some(param) = params.find_by_name(first_name) {
-                        let ty = TypeNs::GenericParam(param.idx);
+                Scope::GenericParams { params, def } if n_segments > 1 => {
+                    if let Some(local_id) = params.find_by_name(first_name) {
+                        let ty = TypeNs::GenericParam(TypeParamId { local_id, parent: *def });
                         return Some(ResolveValueResult::Partial(ty, 1));
                     }
                 }
@@ -368,6 +372,7 @@ impl Resolver {
     ) -> impl Iterator<Item = &'a crate::generics::WherePredicate> + 'a {
         self.scopes
             .iter()
+            .rev()
             .filter_map(|scope| match scope {
                 Scope::GenericParams { params, .. } => Some(params),
                 _ => None,
@@ -376,14 +381,14 @@ impl Resolver {
     }
 
     pub fn generic_def(&self) -> Option<GenericDefId> {
-        self.scopes.iter().find_map(|scope| match scope {
+        self.scopes.iter().rev().find_map(|scope| match scope {
             Scope::GenericParams { def, .. } => Some(*def),
             _ => None,
         })
     }
 
     pub fn body_owner(&self) -> Option<DefWithBodyId> {
-        self.scopes.iter().find_map(|scope| match scope {
+        self.scopes.iter().rev().find_map(|scope| match scope {
             Scope::ExprScope(it) => Some(it.owner),
             _ => None,
         })
@@ -394,7 +399,7 @@ pub enum ScopeDef {
     PerNs(PerNs),
     ImplSelfType(ImplId),
     AdtSelfType(AdtId),
-    GenericParam(u32),
+    GenericParam(TypeParamId),
     Local(PatId),
 }
 
@@ -425,9 +430,12 @@ impl Scope {
                     });
                 }
             }
-            Scope::GenericParams { params, .. } => {
-                for param in params.params.iter() {
-                    f(param.name.clone(), ScopeDef::GenericParam(param.idx))
+            Scope::GenericParams { params, def } => {
+                for (local_id, param) in params.types.iter() {
+                    f(
+                        param.name.clone(),
+                        ScopeDef::GenericParam(TypeParamId { local_id, parent: *def }),
+                    )
                 }
             }
             Scope::ImplBlockScope(i) => {
@@ -473,7 +481,7 @@ impl Resolver {
 
     fn push_generic_params_scope(self, db: &impl DefDatabase, def: GenericDefId) -> Resolver {
         let params = db.generic_params(def);
-        if params.params.is_empty() {
+        if params.types.is_empty() {
             self
         } else {
             self.push_scope(Scope::GenericParams { def, params })

@@ -6,7 +6,7 @@ use ra_db::{FileId, SourceDatabase};
 use ra_syntax::{
     ast::{self, DocCommentsOwner, NameOwner},
     match_ast, AstNode, SmolStr,
-    SyntaxKind::{self, BIND_PAT},
+    SyntaxKind::{self, BIND_PAT, TYPE_PARAM},
     TextRange,
 };
 
@@ -231,34 +231,20 @@ impl ToNav for hir::Module {
     fn to_nav(&self, db: &RootDatabase) -> NavigationTarget {
         let src = self.definition_source(db);
         let name = self.name(db).map(|it| it.to_string().into()).unwrap_or_default();
-        match &src.value {
-            ModuleSource::SourceFile(node) => {
-                let frange = original_range(db, src.with_value(node.syntax()));
-
-                NavigationTarget::from_syntax(
-                    frange.file_id,
-                    name,
-                    None,
-                    frange.range,
-                    node.syntax().kind(),
-                    None,
-                    None,
-                )
-            }
-            ModuleSource::Module(node) => {
-                let frange = original_range(db, src.with_value(node.syntax()));
-
-                NavigationTarget::from_syntax(
-                    frange.file_id,
-                    name,
-                    None,
-                    frange.range,
-                    node.syntax().kind(),
-                    node.doc_comment_text(),
-                    node.short_label(),
-                )
-            }
-        }
+        let syntax = match &src.value {
+            ModuleSource::SourceFile(node) => node.syntax(),
+            ModuleSource::Module(node) => node.syntax(),
+        };
+        let frange = original_range(db, src.with_value(syntax));
+        NavigationTarget::from_syntax(
+            frange.file_id,
+            name,
+            None,
+            frange.range,
+            syntax.kind(),
+            None,
+            None,
+        )
     }
 }
 
@@ -358,6 +344,26 @@ impl ToNav for hir::Local {
             kind: BIND_PAT,
             full_range,
             focus_range,
+            container_name: None,
+            description: None,
+            docs: None,
+        }
+    }
+}
+
+impl ToNav for hir::TypeParam {
+    fn to_nav(&self, db: &RootDatabase) -> NavigationTarget {
+        let src = self.source(db);
+        let range = match src.value {
+            Either::Left(it) => it.syntax().text_range(),
+            Either::Right(it) => it.syntax().text_range(),
+        };
+        NavigationTarget {
+            file_id: src.file_id.original_file(db),
+            name: self.name(db).to_string().into(),
+            kind: TYPE_PARAM,
+            full_range: range,
+            focus_range: None,
             container_name: None,
             description: None,
             docs: None,
