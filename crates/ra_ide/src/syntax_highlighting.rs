@@ -229,7 +229,7 @@ fn highlight_name(db: &RootDatabase, name_kind: NameKind) -> &'static str {
         Def(hir::ModuleDef::TypeAlias(_)) => "type.alias",
         Def(hir::ModuleDef::BuiltinType(_)) => "type.builtin",
         SelfType(_) => "type.self",
-        GenericParam(_) | TypeParam(_) => "type.param",
+        TypeParam(_) => "type.param",
         Local(local) => {
             if local.is_mut(db) {
                 "variable.mut"
