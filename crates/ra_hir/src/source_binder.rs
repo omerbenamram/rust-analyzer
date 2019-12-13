@@ -21,7 +21,10 @@ use hir_def::{
 };
 use hir_expand::{
     hygiene::Hygiene, name::AsName, AstId, HirFileId, InFile, MacroCallId, MacroCallKind,
-    MacroFileKind,
+};
+use hir_ty::{
+    method_resolution::{self, implements_trait},
+    Canonical, InEnvironment, InferenceResult, TraitEnvironment, Ty,
 };
 use ra_syntax::{
     ast::{self, AstNode},
@@ -31,13 +34,9 @@ use ra_syntax::{
 };
 
 use crate::{
-    db::HirDatabase,
-    ty::{
-        method_resolution::{self, implements_trait},
-        InEnvironment, TraitEnvironment, Ty,
-    },
-    Adt, AssocItem, Const, DefWithBody, Enum, EnumVariant, FromSource, Function, ImplBlock, Local,
-    MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Type, TypeAlias, TypeParam,
+    db::HirDatabase, Adt, AssocItem, Const, DefWithBody, Enum, EnumVariant, FromSource, Function,
+    ImplBlock, Local, MacroDef, Name, Path, ScopeDef, Static, Struct, Trait, Type, TypeAlias,
+    TypeParam,
 };
 
 fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -> Option<Resolver> {
@@ -62,6 +61,10 @@ fn try_get_resolver_for_node(db: &impl HirDatabase, node: InFile<&SyntaxNode>) -
             ast::ImplBlock(it) => {
                 let src = node.with_value(it);
                 Some(ImplBlock::from_source(db, src)?.id.resolver(db))
+            },
+            ast::TraitDef(it) => {
+                let src = node.with_value(it);
+                Some(Trait::from_source(db, src)?.id.resolver(db))
             },
             _ => match node.value.kind() {
                 FN_DEF | CONST_DEF | STATIC_DEF => {
@@ -101,7 +104,7 @@ pub struct SourceAnalyzer {
     resolver: Resolver,
     body_owner: Option<DefWithBody>,
     body_source_map: Option<Arc<BodySourceMap>>,
-    infer: Option<Arc<crate::ty::InferenceResult>>,
+    infer: Option<Arc<InferenceResult>>,
     scopes: Option<Arc<ExprScopes>>,
 }
 
@@ -142,7 +145,6 @@ pub struct ReferenceDescriptor {
 
 #[derive(Debug)]
 pub struct Expansion {
-    macro_file_kind: MacroFileKind,
     macro_call_id: MacroCallId,
 }
 
@@ -157,7 +159,7 @@ impl Expansion {
     }
 
     pub fn file_id(&self) -> HirFileId {
-        self.macro_call_id.as_file(self.macro_file_kind)
+        self.macro_call_id.as_file()
     }
 }
 
@@ -378,7 +380,7 @@ impl SourceAnalyzer {
         // There should be no inference vars in types passed here
         // FIXME check that?
         // FIXME replace Unknown by bound vars here
-        let canonical = crate::ty::Canonical { value: ty.ty.value.clone(), num_vars: 0 };
+        let canonical = Canonical { value: ty.ty.value.clone(), num_vars: 0 };
         method_resolution::iterate_method_candidates(
             &canonical,
             db,
@@ -402,7 +404,7 @@ impl SourceAnalyzer {
         // There should be no inference vars in types passed here
         // FIXME check that?
         // FIXME replace Unknown by bound vars here
-        let canonical = crate::ty::Canonical { value: ty.ty.value.clone(), num_vars: 0 };
+        let canonical = Canonical { value: ty.ty.value.clone(), num_vars: 0 };
         method_resolution::iterate_method_candidates(
             &canonical,
             db,
@@ -413,23 +415,9 @@ impl SourceAnalyzer {
         )
     }
 
-    // pub fn autoderef<'a>(
-    //     &'a self,
-    //     db: &'a impl HirDatabase,
-    //     ty: Ty,
-    // ) -> impl Iterator<Item = Ty> + 'a {
-    //     // There should be no inference vars in types passed here
-    //     // FIXME check that?
-    //     let canonical = crate::ty::Canonical { value: ty, num_vars: 0 };
-    //     let krate = self.resolver.krate();
-    //     let environment = TraitEnvironment::lower(db, &self.resolver);
-    //     let ty = crate::ty::InEnvironment { value: canonical, environment };
-    //     crate::ty::autoderef(db, krate, ty).map(|canonical| canonical.value)
-    // }
-
     /// Checks that particular type `ty` implements `std::future::Future`.
     /// This function is used in `.await` syntax completion.
-    pub fn impls_future(&self, db: &impl HirDatabase, ty: Ty) -> bool {
+    pub fn impls_future(&self, db: &impl HirDatabase, ty: Type) -> bool {
         let std_future_path = known::std_future_future();
 
         let std_future_trait = match self.resolver.resolve_known_trait(db, &std_future_path) {
@@ -442,7 +430,7 @@ impl SourceAnalyzer {
             _ => return false,
         };
 
-        let canonical_ty = crate::ty::Canonical { value: ty, num_vars: 0 };
+        let canonical_ty = Canonical { value: ty.ty.value, num_vars: 0 };
         implements_trait(&canonical_ty, db, &self.resolver, krate.into(), std_future_trait)
     }
 
@@ -456,10 +444,7 @@ impl SourceAnalyzer {
             macro_call.file_id,
             db.ast_id_map(macro_call.file_id).ast_id(macro_call.value),
         );
-        Some(Expansion {
-            macro_call_id: def.as_call_id(db, MacroCallKind::FnLike(ast_id)),
-            macro_file_kind: to_macro_file_kind(macro_call.value),
-        })
+        Some(Expansion { macro_call_id: def.as_call_id(db, MacroCallKind::FnLike(ast_id)) })
     }
 }
 
@@ -542,36 +527,4 @@ fn adjust(
             }
         })
         .map(|(_ptr, scope)| *scope)
-}
-
-/// Given a `ast::MacroCall`, return what `MacroKindFile` it belongs to.
-/// FIXME: Not completed
-fn to_macro_file_kind(macro_call: &ast::MacroCall) -> MacroFileKind {
-    let syn = macro_call.syntax();
-    let parent = match syn.parent() {
-        Some(it) => it,
-        None => {
-            // FIXME:
-            // If it is root, which means the parent HirFile
-            // MacroKindFile must be non-items
-            // return expr now.
-            return MacroFileKind::Expr;
-        }
-    };
-
-    match parent.kind() {
-        MACRO_ITEMS | SOURCE_FILE => MacroFileKind::Items,
-        LET_STMT => {
-            // FIXME: Handle Pattern
-            MacroFileKind::Expr
-        }
-        EXPR_STMT => MacroFileKind::Statements,
-        BLOCK => MacroFileKind::Statements,
-        ARG_LIST => MacroFileKind::Expr,
-        TRY_EXPR => MacroFileKind::Expr,
-        _ => {
-            // Unknown , Just guess it is `Items`
-            MacroFileKind::Items
-        }
-    }
 }

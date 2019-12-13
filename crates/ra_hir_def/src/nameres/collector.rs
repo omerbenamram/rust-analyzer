@@ -7,12 +7,12 @@ use hir_expand::{
     builtin_derive::find_builtin_derive,
     builtin_macro::find_builtin_macro,
     name::{self, AsName, Name},
-    HirFileId, MacroCallId, MacroCallKind, MacroDefId, MacroDefKind, MacroFileKind,
+    HirFileId, MacroCallId, MacroCallKind, MacroDefId, MacroDefKind,
 };
 use ra_cfg::CfgOptions;
 use ra_db::{CrateId, FileId};
 use ra_syntax::ast;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use test_utils::tested_by;
 
 use crate::{
@@ -24,9 +24,9 @@ use crate::{
     },
     path::{Path, PathKind},
     per_ns::PerNs,
-    AdtId, AstId, AstItemDef, ConstLoc, ContainerId, EnumId, EnumVariantId, FunctionLoc, ImplId,
-    Intern, LocalImportId, LocalModuleId, LocationCtx, ModuleDefId, ModuleId, StaticLoc, StructId,
-    TraitId, TypeAliasLoc, UnionId,
+    AdtId, AstId, ConstLoc, ContainerId, EnumLoc, EnumVariantId, FunctionLoc, ImplLoc, Intern,
+    LocalImportId, LocalModuleId, ModuleDefId, ModuleId, StaticLoc, StructLoc, TraitLoc,
+    TypeAliasLoc, UnionLoc,
 };
 
 pub(super) fn collect_defs(db: &impl DefDatabase, mut def_map: CrateDefMap) -> CrateDefMap {
@@ -58,43 +58,51 @@ pub(super) fn collect_defs(db: &impl DefDatabase, mut def_map: CrateDefMap) -> C
         def_map,
         glob_imports: FxHashMap::default(),
         unresolved_imports: Vec::new(),
+        resolved_imports: Vec::new(),
+
         unexpanded_macros: Vec::new(),
         unexpanded_attribute_macros: Vec::new(),
         mod_dirs: FxHashMap::default(),
-        macro_stack_monitor: MacroStackMonitor::default(),
-        poison_macros: FxHashSet::default(),
         cfg_options,
     };
     collector.collect();
     collector.finish()
 }
 
-#[derive(Default)]
-struct MacroStackMonitor {
-    counts: FxHashMap<MacroDefId, u32>,
-
-    /// Mainly use for test
-    validator: Option<Box<dyn Fn(u32) -> bool>>,
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PartialResolvedImport {
+    /// None of any namespaces is resolved
+    Unresolved,
+    /// One of namespaces is resolved
+    Indeterminate(PerNs),
+    /// All namespaces are resolved, OR it is came from other crate
+    Resolved(PerNs),
 }
 
-impl MacroStackMonitor {
-    fn increase(&mut self, macro_def_id: MacroDefId) {
-        *self.counts.entry(macro_def_id).or_default() += 1;
-    }
-
-    fn decrease(&mut self, macro_def_id: MacroDefId) {
-        *self.counts.entry(macro_def_id).or_default() -= 1;
-    }
-
-    fn is_poison(&self, macro_def_id: MacroDefId) -> bool {
-        let cur = *self.counts.get(&macro_def_id).unwrap_or(&0);
-
-        if let Some(validator) = &self.validator {
-            validator(cur)
-        } else {
-            cur > 100
+impl PartialResolvedImport {
+    fn namespaces(&self) -> PerNs {
+        match self {
+            PartialResolvedImport::Unresolved => PerNs::none(),
+            PartialResolvedImport::Indeterminate(ns) => *ns,
+            PartialResolvedImport::Resolved(ns) => *ns,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImportDirective {
+    module_id: LocalModuleId,
+    import_id: LocalImportId,
+    import: raw::ImportData,
+    status: PartialResolvedImport,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MacroDirective {
+    module_id: LocalModuleId,
+    ast_id: AstId<ast::MacroCall>,
+    path: Path,
+    legacy: Option<MacroCallId>,
 }
 
 /// Walks the tree of module recursively
@@ -102,26 +110,11 @@ struct DefCollector<'a, DB> {
     db: &'a DB,
     def_map: CrateDefMap,
     glob_imports: FxHashMap<LocalModuleId, Vec<(LocalModuleId, LocalImportId)>>,
-    unresolved_imports: Vec<(LocalModuleId, LocalImportId, raw::ImportData)>,
-    unexpanded_macros: Vec<(LocalModuleId, AstId<ast::MacroCall>, Path)>,
+    unresolved_imports: Vec<ImportDirective>,
+    resolved_imports: Vec<ImportDirective>,
+    unexpanded_macros: Vec<MacroDirective>,
     unexpanded_attribute_macros: Vec<(LocalModuleId, AstId<ast::ModuleItem>, Path)>,
     mod_dirs: FxHashMap<LocalModuleId, ModDir>,
-
-    /// Some macro use `$tt:tt which mean we have to handle the macro perfectly
-    /// To prevent stack overflow, we add a deep counter here for prevent that.
-    macro_stack_monitor: MacroStackMonitor,
-    /// Some macros are not well-behavior, which leads to infinite loop
-    /// e.g. macro_rules! foo { ($ty:ty) => { foo!($ty); } }
-    /// We mark it down and skip it in collector
-    ///
-    /// FIXME:
-    /// Right now it only handle a poison macro in a single crate,
-    /// such that if other crate try to call that macro,
-    /// the whole process will do again until it became poisoned in that crate.
-    /// We should handle this macro set globally
-    /// However, do we want to put it as a global variable?
-    poison_macros: FxHashSet<MacroDefId>,
-
     cfg_options: &'a CfgOptions,
 }
 
@@ -148,9 +141,11 @@ where
         let mut i = 0;
         loop {
             self.db.check_canceled();
-            match (self.resolve_imports(), self.resolve_macros()) {
-                (ReachedFixedPoint::Yes, ReachedFixedPoint::Yes) => break,
-                _ => i += 1,
+            self.resolve_imports();
+
+            match self.resolve_macros() {
+                ReachedFixedPoint::Yes => break,
+                ReachedFixedPoint::No => i += 1,
             }
             if i == 1000 {
                 log::error!("name resolution is stuck");
@@ -158,10 +153,26 @@ where
             }
         }
 
+        // Resolve all indeterminate resolved imports again
+        // As some of the macros will expand newly import shadowing partial resolved imports
+        // FIXME: We maybe could skip this, if we handle the Indetermine imports in `resolve_imports`
+        // correctly
+        let partial_resolved = self.resolved_imports.iter().filter_map(|directive| {
+            if let PartialResolvedImport::Indeterminate(_) = directive.status {
+                let mut directive = directive.clone();
+                directive.status = PartialResolvedImport::Unresolved;
+                Some(directive)
+            } else {
+                None
+            }
+        });
+        self.unresolved_imports.extend(partial_resolved);
+        self.resolve_imports();
+
         let unresolved_imports = std::mem::replace(&mut self.unresolved_imports, Vec::new());
         // show unresolved imports in completion, etc
-        for (module_id, import, import_data) in unresolved_imports {
-            self.record_resolved_import(module_id, PerNs::none(), import, &import_data)
+        for directive in unresolved_imports {
+            self.record_resolved_import(&directive)
         }
     }
 
@@ -262,31 +273,43 @@ where
         }
     }
 
-    fn resolve_imports(&mut self) -> ReachedFixedPoint {
-        let mut imports = std::mem::replace(&mut self.unresolved_imports, Vec::new());
-        let mut resolved = Vec::new();
-        imports.retain(|(module_id, import, import_data)| {
-            let (def, fp) = self.resolve_import(*module_id, import_data);
-            if fp == ReachedFixedPoint::Yes {
-                resolved.push((*module_id, def, *import, import_data.clone()))
+    /// Import resolution
+    ///
+    /// This is a fix point algorithm. We resolve imports until no forward
+    /// progress in resolving imports is made
+    fn resolve_imports(&mut self) {
+        let mut n_previous_unresolved = self.unresolved_imports.len() + 1;
+
+        while self.unresolved_imports.len() < n_previous_unresolved {
+            n_previous_unresolved = self.unresolved_imports.len();
+            let imports = std::mem::replace(&mut self.unresolved_imports, Vec::new());
+            for mut directive in imports {
+                directive.status = self.resolve_import(directive.module_id, &directive.import);
+
+                match directive.status {
+                    PartialResolvedImport::Indeterminate(_) => {
+                        self.record_resolved_import(&directive);
+                        // FIXME: For avoid performance regression,
+                        // we consider an imported resolved if it is indeterminate (i.e not all namespace resolved)
+                        self.resolved_imports.push(directive)
+                    }
+                    PartialResolvedImport::Resolved(_) => {
+                        self.record_resolved_import(&directive);
+                        self.resolved_imports.push(directive)
+                    }
+                    PartialResolvedImport::Unresolved => {
+                        self.unresolved_imports.push(directive);
+                    }
+                }
             }
-            fp == ReachedFixedPoint::No
-        });
-        self.unresolved_imports = imports;
-        // Resolves imports, filling-in module scopes
-        let result =
-            if resolved.is_empty() { ReachedFixedPoint::Yes } else { ReachedFixedPoint::No };
-        for (module_id, def, import, import_data) in resolved {
-            self.record_resolved_import(module_id, def, import, &import_data)
         }
-        result
     }
 
     fn resolve_import(
         &self,
         module_id: LocalModuleId,
         import: &raw::ImportData,
-    ) -> (PerNs, ReachedFixedPoint) {
+    ) -> PartialResolvedImport {
         log::debug!("resolving import: {:?} ({:?})", import, self.def_map.edition);
         if import.is_extern_crate {
             let res = self.def_map.resolve_name_in_extern_prelude(
@@ -295,7 +318,7 @@ where
                     .as_ident()
                     .expect("extern crate should have been desugared to one-element path"),
             );
-            (res, ReachedFixedPoint::Yes)
+            PartialResolvedImport::Resolved(res)
         } else {
             let res = self.def_map.resolve_path_fp_with_macro(
                 self.db,
@@ -305,17 +328,35 @@ where
                 BuiltinShadowMode::Module,
             );
 
-            (res.resolved_def, res.reached_fixedpoint)
+            let def = res.resolved_def;
+            if res.reached_fixedpoint == ReachedFixedPoint::No {
+                return PartialResolvedImport::Unresolved;
+            }
+
+            if let Some(krate) = res.krate {
+                if krate != self.def_map.krate {
+                    return PartialResolvedImport::Resolved(def);
+                }
+            }
+
+            // Check whether all namespace is resolved
+            if def.take_types().is_some()
+                && def.take_values().is_some()
+                && def.take_macros().is_some()
+            {
+                PartialResolvedImport::Resolved(def)
+            } else {
+                PartialResolvedImport::Indeterminate(def)
+            }
         }
     }
 
-    fn record_resolved_import(
-        &mut self,
-        module_id: LocalModuleId,
-        def: PerNs,
-        import_id: LocalImportId,
-        import: &raw::ImportData,
-    ) {
+    fn record_resolved_import(&mut self, directive: &ImportDirective) {
+        let module_id = directive.module_id;
+        let import_id = directive.import_id;
+        let import = &directive.import;
+        let def = directive.status.namespaces();
+
         if import.is_glob {
             log::debug!("glob import: {:?}", import);
             match def.take_types() {
@@ -352,10 +393,10 @@ where
 
                         self.update(module_id, Some(import_id), &items);
                         // record the glob import in case we add further items
-                        self.glob_imports
-                            .entry(m.local_id)
-                            .or_default()
-                            .push((module_id, import_id));
+                        let glob = self.glob_imports.entry(m.local_id).or_default();
+                        if !glob.iter().any(|it| *it == (module_id, import_id)) {
+                            glob.push((module_id, import_id));
+                        }
                     }
                 }
                 Some(ModuleDefId::AdtId(AdtId::EnumId(e))) => {
@@ -477,18 +518,24 @@ where
             std::mem::replace(&mut self.unexpanded_attribute_macros, Vec::new());
         let mut resolved = Vec::new();
         let mut res = ReachedFixedPoint::Yes;
-        macros.retain(|(module_id, ast_id, path)| {
+        macros.retain(|directive| {
+            if let Some(call_id) = directive.legacy {
+                res = ReachedFixedPoint::No;
+                resolved.push((directive.module_id, call_id));
+                return false;
+            }
+
             let resolved_res = self.def_map.resolve_path_fp_with_macro(
                 self.db,
                 ResolveMode::Other,
-                *module_id,
-                path,
+                directive.module_id,
+                &directive.path,
                 BuiltinShadowMode::Module,
             );
 
             if let Some(def) = resolved_res.resolved_def.take_macros() {
-                let call_id = def.as_call_id(self.db, MacroCallKind::FnLike(*ast_id));
-                resolved.push((*module_id, call_id, def));
+                let call_id = def.as_call_id(self.db, MacroCallKind::FnLike(directive.ast_id));
+                resolved.push((directive.module_id, call_id));
                 res = ReachedFixedPoint::No;
                 return false;
             }
@@ -500,7 +547,7 @@ where
 
             if let Some(def) = resolved_res {
                 let call_id = def.as_call_id(self.db, MacroCallKind::Attr(*ast_id));
-                resolved.push((*module_id, call_id, def));
+                resolved.push((*module_id, call_id));
                 res = ReachedFixedPoint::No;
                 return false;
             }
@@ -511,8 +558,8 @@ where
         self.unexpanded_macros = macros;
         self.unexpanded_attribute_macros = attribute_macros;
 
-        for (module_id, macro_call_id, macro_def_id) in resolved {
-            self.collect_macro_expansion(module_id, macro_call_id, macro_def_id);
+        for (module_id, macro_call_id) in resolved {
+            self.collect_macro_expansion(module_id, macro_call_id);
         }
 
         res
@@ -532,36 +579,18 @@ where
         None
     }
 
-    fn collect_macro_expansion(
-        &mut self,
-        module_id: LocalModuleId,
-        macro_call_id: MacroCallId,
-        macro_def_id: MacroDefId,
-    ) {
-        if self.poison_macros.contains(&macro_def_id) {
-            return;
+    fn collect_macro_expansion(&mut self, module_id: LocalModuleId, macro_call_id: MacroCallId) {
+        let file_id: HirFileId = macro_call_id.as_file();
+        let raw_items = self.db.raw_items(file_id);
+        let mod_dir = self.mod_dirs[&module_id].clone();
+        ModCollector {
+            def_collector: &mut *self,
+            file_id,
+            module_id,
+            raw_items: &raw_items,
+            mod_dir,
         }
-
-        self.macro_stack_monitor.increase(macro_def_id);
-
-        if !self.macro_stack_monitor.is_poison(macro_def_id) {
-            let file_id: HirFileId = macro_call_id.as_file(MacroFileKind::Items);
-            let raw_items = self.db.raw_items(file_id);
-            let mod_dir = self.mod_dirs[&module_id].clone();
-            ModCollector {
-                def_collector: &mut *self,
-                file_id,
-                module_id,
-                raw_items: &raw_items,
-                mod_dir,
-            }
-            .collect(raw_items.items());
-        } else {
-            log::error!("Too deep macro expansion: {:?}", macro_call_id);
-            self.poison_macros.insert(macro_def_id);
-        }
-
-        self.macro_stack_monitor.decrease(macro_def_id);
+        .collect(raw_items.items());
     }
 
     fn finish(self) -> CrateDefMap {
@@ -615,10 +644,14 @@ where
                     raw::RawItemKind::Module(m) => {
                         self.collect_module(&self.raw_items[m], &item.attrs)
                     }
-                    raw::RawItemKind::Import(import_id) => self
-                        .def_collector
-                        .unresolved_imports
-                        .push((self.module_id, import_id, self.raw_items[import_id].clone())),
+                    raw::RawItemKind::Import(import_id) => {
+                        self.def_collector.unresolved_imports.push(ImportDirective {
+                            module_id: self.module_id,
+                            import_id,
+                            import: self.raw_items[import_id].clone(),
+                            status: PartialResolvedImport::Unresolved,
+                        })
+                    }
                     raw::RawItemKind::Def(def) => {
                         self.define_def(&self.raw_items[def], &item.attrs)
                     }
@@ -628,9 +661,11 @@ where
                             krate: self.def_collector.def_map.krate,
                             local_id: self.module_id,
                         };
-                        let ctx = LocationCtx::new(self.def_collector.db, module, self.file_id);
-                        let imp_id = ImplId::from_ast_id(ctx, self.raw_items[imp].ast_id);
-                        self.def_collector.def_map.modules[self.module_id].impls.push(imp_id)
+                        let ast_id = self.raw_items[imp].ast_id;
+                        let impl_id =
+                            ImplLoc { container: module, ast_id: AstId::new(self.file_id, ast_id) }
+                                .intern(self.def_collector.db);
+                        self.def_collector.def_map.modules[self.module_id].impls.push(impl_id)
                     }
                 }
             }
@@ -718,8 +753,6 @@ where
 
     fn define_def(&mut self, def: &raw::DefData, attrs: &Attrs) {
         let module = ModuleId { krate: self.def_collector.def_map.krate, local_id: self.module_id };
-        let ctx = LocationCtx::new(self.def_collector.db, module, self.file_id);
-
         // FIXME: check attrs to see if this is an attribute macro invocation;
         // in which case we don't add the invocation, just a single attribute
         // macro invocation
@@ -738,14 +771,20 @@ where
                 PerNs::values(def.into())
             }
             raw::DefKind::Struct(ast_id) => {
-                let id = StructId::from_ast_id(ctx, ast_id).into();
-                PerNs::both(id, id)
+                let def = StructLoc { container: module, ast_id: AstId::new(self.file_id, ast_id) }
+                    .intern(self.def_collector.db);
+                PerNs::both(def.into(), def.into())
             }
             raw::DefKind::Union(ast_id) => {
-                let id = UnionId::from_ast_id(ctx, ast_id).into();
-                PerNs::both(id, id)
+                let def = UnionLoc { container: module, ast_id: AstId::new(self.file_id, ast_id) }
+                    .intern(self.def_collector.db);
+                PerNs::both(def.into(), def.into())
             }
-            raw::DefKind::Enum(ast_id) => PerNs::types(EnumId::from_ast_id(ctx, ast_id).into()),
+            raw::DefKind::Enum(ast_id) => {
+                let def = EnumLoc { container: module, ast_id: AstId::new(self.file_id, ast_id) }
+                    .intern(self.def_collector.db);
+                PerNs::types(def.into())
+            }
             raw::DefKind::Const(ast_id) => {
                 let def = ConstLoc {
                     container: ContainerId::ModuleId(module),
@@ -761,7 +800,12 @@ where
 
                 PerNs::values(def.into())
             }
-            raw::DefKind::Trait(ast_id) => PerNs::types(TraitId::from_ast_id(ctx, ast_id).into()),
+            raw::DefKind::Trait(ast_id) => {
+                let def = TraitLoc { container: module, ast_id: AstId::new(self.file_id, ast_id) }
+                    .intern(self.def_collector.db);
+
+                PerNs::types(def.into())
+            }
             raw::DefKind::TypeAlias(ast_id) => {
                 let def = TypeAliasLoc {
                     container: ContainerId::ModuleId(module),
@@ -825,15 +869,20 @@ where
             return;
         }
 
-        // Case 2: try to resolve in legacy scope and expand macro_rules, triggering
-        // recursive item collection.
+        // Case 2: try to resolve in legacy scope and expand macro_rules
         if let Some(macro_def) = mac.path.as_ident().and_then(|name| {
             self.def_collector.def_map[self.module_id].scope.get_legacy_macro(&name)
         }) {
             let macro_call_id =
                 macro_def.as_call_id(self.def_collector.db, MacroCallKind::FnLike(ast_id));
 
-            self.def_collector.collect_macro_expansion(self.module_id, macro_call_id, macro_def);
+            self.def_collector.unexpanded_macros.push(MacroDirective {
+                module_id: self.module_id,
+                path: mac.path.clone(),
+                ast_id,
+                legacy: Some(macro_call_id),
+            });
+
             return;
         }
 
@@ -843,7 +892,13 @@ where
         if path.is_ident() {
             path.kind = PathKind::Self_;
         }
-        self.def_collector.unexpanded_macros.push((self.module_id, ast_id, path));
+
+        self.def_collector.unexpanded_macros.push(MacroDirective {
+            module_id: self.module_id,
+            path,
+            ast_id,
+            legacy: None,
+        });
     }
 
     fn import_all_legacy_macros(&mut self, module_id: LocalModuleId) {
@@ -868,40 +923,29 @@ fn is_macro_rules(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crate::{db::DefDatabase, test_db::TestDB};
     use ra_arena::Arena;
     use ra_db::{fixture::WithFixture, SourceDatabase};
-    use rustc_hash::FxHashSet;
-
-    use crate::{db::DefDatabase, test_db::TestDB};
 
     use super::*;
 
-    fn do_collect_defs(
-        db: &impl DefDatabase,
-        def_map: CrateDefMap,
-        monitor: MacroStackMonitor,
-    ) -> (CrateDefMap, FxHashSet<MacroDefId>) {
+    fn do_collect_defs(db: &impl DefDatabase, def_map: CrateDefMap) -> CrateDefMap {
         let mut collector = DefCollector {
             db,
             def_map,
             glob_imports: FxHashMap::default(),
             unresolved_imports: Vec::new(),
+            resolved_imports: Vec::new(),
             unexpanded_macros: Vec::new(),
             unexpanded_attribute_macros: Vec::new(),
             mod_dirs: FxHashMap::default(),
-            macro_stack_monitor: monitor,
-            poison_macros: FxHashSet::default(),
             cfg_options: &CfgOptions::default(),
         };
         collector.collect();
-        (collector.def_map, collector.poison_macros)
+        collector.def_map
     }
 
-    fn do_limited_resolve(
-        code: &str,
-        limit: u32,
-        poison_limit: u32,
-    ) -> (CrateDefMap, FxHashSet<MacroDefId>) {
+    fn do_resolve(code: &str) -> CrateDefMap {
         let (db, _file_id) = TestDB::with_single_file(&code);
         let krate = db.test_crate();
 
@@ -919,59 +963,18 @@ mod tests {
                 diagnostics: Vec::new(),
             }
         };
-
-        let mut monitor = MacroStackMonitor::default();
-        monitor.validator = Some(Box::new(move |count| {
-            assert!(count < limit);
-            count >= poison_limit
-        }));
-
-        do_collect_defs(&db, def_map, monitor)
+        do_collect_defs(&db, def_map)
     }
 
     #[test]
-    fn test_macro_expand_limit_width() {
-        do_limited_resolve(
+    fn test_macro_expand_will_stop() {
+        do_resolve(
             r#"
         macro_rules! foo {
             ($($ty:ty)*) => { foo!($($ty)*, $($ty)*); }
         }
 foo!(KABOOM);
         "#,
-            16,
-            1000,
         );
-    }
-
-    #[test]
-    fn test_macro_expand_poisoned() {
-        let (_, poison_macros) = do_limited_resolve(
-            r#"
-        macro_rules! foo {
-            ($ty:ty) => { foo!($ty); }
-        }
-foo!(KABOOM);
-        "#,
-            100,
-            16,
-        );
-
-        assert_eq!(poison_macros.len(), 1);
-    }
-
-    #[test]
-    fn test_macro_expand_normal() {
-        let (_, poison_macros) = do_limited_resolve(
-            r#"
-        macro_rules! foo {
-            ($ident:ident) => { struct $ident {} }
-        }
-foo!(Bar);
-        "#,
-            16,
-            16,
-        );
-
-        assert_eq!(poison_macros.len(), 0);
     }
 }

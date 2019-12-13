@@ -12,8 +12,8 @@ use crate::{
     db::DefDatabase,
     src::HasSource,
     type_ref::{Mutability, TypeRef},
-    AssocItemId, AstItemDef, ConstId, ConstLoc, ContainerId, FunctionId, FunctionLoc, ImplId,
-    Intern, Lookup, StaticId, TraitId, TypeAliasId, TypeAliasLoc,
+    AssocItemId, ConstId, ConstLoc, ContainerId, FunctionId, FunctionLoc, ImplId, Intern, Lookup,
+    StaticId, TraitId, TypeAliasId, TypeAliasLoc,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,7 +94,7 @@ pub struct TraitData {
 
 impl TraitData {
     pub(crate) fn trait_data_query(db: &impl DefDatabase, tr: TraitId) -> Arc<TraitData> {
-        let src = tr.source(db);
+        let src = tr.lookup(db).source(db);
         let name = src.value.name().map_or_else(Name::missing, |n| n.as_name());
         let auto = src.value.is_auto();
         let ast_id_map = db.ast_id_map(src.file_id);
@@ -167,7 +167,7 @@ pub struct ImplData {
 
 impl ImplData {
     pub(crate) fn impl_data_query(db: &impl DefDatabase, id: ImplId) -> Arc<ImplData> {
-        let src = id.source(db);
+        let src = id.lookup(db).source(db);
         let items = db.ast_id_map(src.file_id);
 
         let target_trait = src.value.target_trait().map(TypeRef::from_ast);

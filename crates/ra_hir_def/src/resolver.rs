@@ -17,9 +17,9 @@ use crate::{
     nameres::{BuiltinShadowMode, CrateDefMap},
     path::{Path, PathKind},
     per_ns::PerNs,
-    AdtId, AstItemDef, ConstId, ContainerId, DefWithBodyId, EnumId, EnumVariantId, FunctionId,
-    GenericDefId, HasModule, ImplId, LocalModuleId, Lookup, ModuleDefId, ModuleId, StaticId,
-    StructId, TraitId, TypeAliasId, TypeParamId,
+    AdtId, ConstId, ContainerId, DefWithBodyId, EnumId, EnumVariantId, FunctionId, GenericDefId,
+    HasModule, ImplId, LocalModuleId, Lookup, ModuleDefId, ModuleId, StaticId, StructId, TraitId,
+    TypeAliasId, TypeParamId, VariantId,
 };
 
 #[derive(Debug, Clone, Default)]
@@ -524,7 +524,7 @@ impl HasResolver for ModuleId {
 
 impl HasResolver for TraitId {
     fn resolver(self, db: &impl DefDatabase) -> Resolver {
-        self.module(db).resolver(db).push_generic_params_scope(db, self.into())
+        self.lookup(db).container.resolver(db).push_generic_params_scope(db, self.into())
     }
 }
 
@@ -544,16 +544,6 @@ impl HasResolver for FunctionId {
     }
 }
 
-impl HasResolver for DefWithBodyId {
-    fn resolver(self, db: &impl DefDatabase) -> Resolver {
-        match self {
-            DefWithBodyId::ConstId(c) => c.resolver(db),
-            DefWithBodyId::FunctionId(f) => f.resolver(db),
-            DefWithBodyId::StaticId(s) => s.resolver(db),
-        }
-    }
-}
-
 impl HasResolver for ConstId {
     fn resolver(self, db: &impl DefDatabase) -> Resolver {
         self.lookup(db).container.resolver(db)
@@ -569,6 +559,26 @@ impl HasResolver for StaticId {
 impl HasResolver for TypeAliasId {
     fn resolver(self, db: &impl DefDatabase) -> Resolver {
         self.lookup(db).container.resolver(db).push_generic_params_scope(db, self.into())
+    }
+}
+
+impl HasResolver for ImplId {
+    fn resolver(self, db: &impl DefDatabase) -> Resolver {
+        self.lookup(db)
+            .container
+            .resolver(db)
+            .push_generic_params_scope(db, self.into())
+            .push_impl_block_scope(self)
+    }
+}
+
+impl HasResolver for DefWithBodyId {
+    fn resolver(self, db: &impl DefDatabase) -> Resolver {
+        match self {
+            DefWithBodyId::ConstId(c) => c.resolver(db),
+            DefWithBodyId::FunctionId(f) => f.resolver(db),
+            DefWithBodyId::StaticId(s) => s.resolver(db),
+        }
     }
 }
 
@@ -596,11 +606,12 @@ impl HasResolver for GenericDefId {
     }
 }
 
-impl HasResolver for ImplId {
+impl HasResolver for VariantId {
     fn resolver(self, db: &impl DefDatabase) -> Resolver {
-        self.module(db)
-            .resolver(db)
-            .push_generic_params_scope(db, self.into())
-            .push_impl_block_scope(self)
+        match self {
+            VariantId::EnumVariantId(it) => it.parent.resolver(db),
+            VariantId::StructId(it) => it.resolver(db),
+            VariantId::UnionId(it) => it.resolver(db),
+        }
     }
 }

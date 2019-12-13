@@ -2,8 +2,7 @@
 use crate::db::AstDatabase;
 use crate::{
     ast::{self, AstNode},
-    name, AstId, CrateId, HirFileId, MacroCallId, MacroDefId, MacroDefKind, MacroFileKind,
-    TextUnit,
+    name, AstId, CrateId, HirFileId, MacroCallId, MacroDefId, MacroDefKind, TextUnit,
 };
 
 use crate::quote;
@@ -90,7 +89,7 @@ fn line_expand(
     let arg = loc.kind.arg(db).ok_or_else(|| mbe::ExpandError::UnexpectedToken)?;
     let arg_start = arg.text_range().start();
 
-    let file = id.as_file(MacroFileKind::Expr);
+    let file = id.as_file();
     let line_num = to_line_number(db, file, arg_start);
 
     let expanded = quote! {
@@ -158,7 +157,7 @@ fn column_expand(
     let _arg = macro_call.token_tree().ok_or_else(|| mbe::ExpandError::UnexpectedToken)?;
     let col_start = macro_call.syntax().text_range().start();
 
-    let file = id.as_file(MacroFileKind::Expr);
+    let file = id.as_file();
     let col_num = to_col_number(db, file, col_start);
 
     let expanded = quote! {
@@ -209,15 +208,20 @@ fn format_args_expand(
     _id: MacroCallId,
     tt: &tt::Subtree,
 ) -> Result<tt::Subtree, mbe::ExpandError> {
-    // We expand `format_args!("", arg1, arg2)` to
-    // `std::fmt::Arguments::new_v1(&[], &[&arg1, &arg2])`,
+    // We expand `format_args!("", a1, a2)` to
+    // ```
+    // std::fmt::Arguments::new_v1(&[], &[
+    //   std::fmt::ArgumentV1::new(&arg1,std::fmt::Display::fmt),
+    //   std::fmt::ArgumentV1::new(&arg2,std::fmt::Display::fmt),
+    // ])
+    // ```,
     // which is still not really correct, but close enough for now
     let mut args = Vec::new();
     let mut current = Vec::new();
     for tt in tt.token_trees.iter().cloned() {
         match tt {
             tt::TokenTree::Leaf(tt::Leaf::Punct(p)) if p.char == ',' => {
-                args.push(tt::Subtree { delimiter: tt::Delimiter::None, token_trees: current });
+                args.push(current);
                 current = Vec::new();
             }
             _ => {
@@ -226,13 +230,15 @@ fn format_args_expand(
         }
     }
     if !current.is_empty() {
-        args.push(tt::Subtree { delimiter: tt::Delimiter::None, token_trees: current });
+        args.push(current);
     }
     if args.is_empty() {
         return Err(mbe::ExpandError::NoMatchingRule);
     }
     let _format_string = args.remove(0);
-    let arg_tts = args.into_iter().flat_map(|arg| (quote! { & #arg , }).token_trees);
+    let arg_tts = args.into_iter().flat_map(|arg| {
+        quote! { std::fmt::ArgumentV1::new(&(##arg), std::fmt::Display::fmt), }
+    }.token_trees).collect::<Vec<_>>();
     let expanded = quote! {
         std::fmt::Arguments::new_v1(&[], &[##arg_tts])
     };
@@ -269,7 +275,7 @@ mod tests {
         };
 
         let id = db.intern_macro(loc);
-        let parsed = db.parse_or_expand(id.as_file(MacroFileKind::Expr)).unwrap();
+        let parsed = db.parse_or_expand(id.as_file()).unwrap();
 
         parsed.text().to_string()
     }
@@ -361,6 +367,9 @@ mod tests {
             BuiltinFnLikeExpander::FormatArgs,
         );
 
-        assert_eq!(expanded, r#"std::fmt::Arguments::new_v1(&[] ,&[&arg1(a,b,c),&arg2,])"#);
+        assert_eq!(
+            expanded,
+            r#"std::fmt::Arguments::new_v1(&[] ,&[std::fmt::ArgumentV1::new(&(arg1(a,b,c)),std::fmt::Display::fmt),std::fmt::ArgumentV1::new(&(arg2),std::fmt::Display::fmt),])"#
+        );
     }
 }

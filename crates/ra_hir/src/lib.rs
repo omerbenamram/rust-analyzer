@@ -26,33 +26,27 @@ macro_rules! impl_froms {
     }
 }
 
-pub mod debug;
-
 pub mod db;
 pub mod source_binder;
 
-mod ty;
 pub mod diagnostics;
 
 mod from_id;
 mod code_model;
 
-pub mod from_source;
+mod has_source;
+mod from_source;
 
 pub use crate::{
     code_model::{
-        src::HasSource, Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency,
-        DefWithBody, Docs, Enum, EnumVariant, FieldSource, Function, GenericDef, HasAttrs,
-        ImplBlock, Import, Local, MacroDef, Module, ModuleDef, ScopeDef, Static, Struct,
-        StructField, Trait, Type, TypeAlias, TypeParam, Union, VariantDef,
+        Adt, AssocItem, AttrDef, Const, Container, Crate, CrateDependency, DefWithBody, Docs, Enum,
+        EnumVariant, FieldSource, Function, GenericDef, HasAttrs, ImplBlock, Import, Local,
+        MacroDef, Module, ModuleDef, ScopeDef, Static, Struct, StructField, Trait, Type, TypeAlias,
+        TypeParam, Union, VariantDef,
     },
     from_source::FromSource,
+    has_source::HasSource,
     source_binder::{PathResolution, ScopeEntryWithSyntax, SourceAnalyzer},
-    ty::{
-        display::HirDisplay,
-        primitive::{FloatBitness, FloatTy, IntBitness, IntTy, Signedness, Uncertain},
-        ApplicationTy, CallableDef, Substs, TraitRef, Ty, TypeCtor, TypeWalk,
-    },
 };
 
 pub use hir_def::{
@@ -66,3 +60,4 @@ pub use hir_def::{
 pub use hir_expand::{
     name::Name, HirFileId, InFile, MacroCallId, MacroCallLoc, MacroDefId, MacroFile,
 };
+pub use hir_ty::{display::HirDisplay, CallableDef};

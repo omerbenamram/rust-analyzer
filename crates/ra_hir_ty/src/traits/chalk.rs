@@ -9,9 +9,7 @@ use chalk_ir::{
 };
 use chalk_rust_ir::{AssociatedTyDatum, AssociatedTyValue, ImplDatum, StructDatum, TraitDatum};
 
-use hir_def::{
-    AssocItemId, AstItemDef, ContainerId, GenericDefId, ImplId, Lookup, TraitId, TypeAliasId,
-};
+use hir_def::{AssocItemId, ContainerId, GenericDefId, ImplId, Lookup, TraitId, TypeAliasId};
 use ra_db::{
     salsa::{InternId, InternKey},
     CrateId,
@@ -593,7 +591,7 @@ pub(crate) fn trait_datum_query(
     let bound_vars = Substs::bound_vars(&generic_params);
     let flags = chalk_rust_ir::TraitFlags {
         auto: trait_data.auto,
-        upstream: trait_.module(db).krate != krate,
+        upstream: trait_.lookup(db).container.krate != krate,
         non_enumerable: true,
         coinductive: false, // only relevant for Chalk testing
         // FIXME set these flags correctly
@@ -673,7 +671,7 @@ fn impl_block_datum(
     let bound_vars = Substs::bound_vars(&generic_params);
     let trait_ref = trait_ref.subst(&bound_vars);
     let trait_ = trait_ref.trait_;
-    let impl_type = if impl_id.module(db).krate == krate {
+    let impl_type = if impl_id.lookup(db).container.krate == krate {
         chalk_rust_ir::ImplType::Local
     } else {
         chalk_rust_ir::ImplType::External
